@@ -55,6 +55,11 @@ import pytest
 import sqlglot
 from sqlglot.errors import ParseError
 
+from signalforge.draft.models import CandidateTestCustomSQL
+from signalforge.manifest.models import Column, Manifest, Model
+from signalforge.prune.compiler import _compile_test, _InvalidIdentifier
+from signalforge.warehouse.models import BIGQUERY_DIALECT, DATABRICKS_DIALECT, TableRef
+
 # ``sqlglot`` is a base runtime dependency — import it directly at module scope.
 # Do NOT ``pytest.importorskip`` it: that pattern is only for the gated
 # marker/fakesnow deps that may be absent from the default environment.
@@ -131,3 +136,69 @@ def test_parse_guard_rejects_malformed_databricks_sql() -> None:
     """
     with pytest.raises(ParseError):
         sqlglot.parse_one("SELECT FROM WHERE )(", dialect="databricks")
+
+
+# ---------------------------------------------------------------------------
+# #270 US-003 DEC-003 (G1) — the compiler REFUSES an ingested body the LIVE
+# Databricks dialect does not accept, before the always-1 verbatim wrap. A body
+# that parses under the ingest-side ``"bigquery"`` default but raises under
+# ``databricks`` routes to ``_InvalidIdentifier`` → ``kept-without-evidence``.
+# ---------------------------------------------------------------------------
+
+
+def _make_orders_model() -> Model:
+    return Model(
+        unique_id="model.shop.orders",
+        name="orders",
+        resource_type="model",
+        package_name="shop",
+        original_file_path="models/orders.sql",
+        path="orders.sql",
+        database="fake_project",
+        schema="dataset",  # type: ignore[call-arg]
+        columns={"customer_id": Column(name="customer_id")},
+        raw_code="select 1",
+    )
+
+
+def _make_orders_table_ref() -> TableRef:
+    return TableRef(project="fake_project", dataset="dataset", name="orders")
+
+
+def _make_manifest() -> Manifest:
+    return Manifest(
+        metadata={"dbt_schema_version": "v12"},
+        nodes={"model.shop.orders": _make_orders_model()},
+    )
+
+
+def test_compile_ingested_custom_sql_unparseable_under_databricks_returns_sentinel() -> None:
+    """#270 DEC-003 (G1) per-dialect pin: a ``FOR SYSTEM_TIME AS OF`` clause
+    parses under BigQuery (the ingest default) but raises under sqlglot's
+    ``databricks`` dialect, so the compiler refuses it under ``DATABRICKS_DIALECT``
+    → ``_InvalidIdentifier`` → kept-without-evidence, never the always-1 wrap."""
+    # BigQuery parses ``FOR SYSTEM_TIME AS OF``; Databricks/Spark does not.
+    body = (
+        "select order_id\n"
+        "from `fake_project`.`dataset`.`orders`\n"
+        "for system_time as of timestamp '2024-01-01'"
+    )
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=body, from_manifest=True),
+        _make_orders_table_ref(),
+        DATABRICKS_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "does not parse under the live warehouse dialect" in result.reason
+    assert "databricks" in result.reason
+    # Sanity: the SAME body compiles under BigQuery — it is the DIALECT refusing.
+    ok = _compile_test(
+        CandidateTestCustomSQL(sql=body, from_manifest=True),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert ok == body
