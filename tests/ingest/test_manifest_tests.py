@@ -609,18 +609,25 @@ def test_lone_surrogate_compiled_code_does_not_crash_the_size_cap() -> None:
     ``"\\ud800".encode("utf-8")`` raises ``UnicodeEncodeError`` (NOT a
     `_PARSE_FAILURES` type), which would escape this stage-0 reader and abort the
     whole prune run — the class of bug US-001 closed for the sqlglot gates. The
-    cap encodes with ``surrogatepass`` so the body is measured, then a downstream
-    sqlglot gate refuses it → the candidate is skip-recorded, never a crash.
+    size-cap step catches that ``UnicodeEncodeError`` and skip-records the body
+    immediately (``reason="malformed-supported-test"``). It deliberately does NOT
+    encode through with ``surrogatepass`` and defer to a downstream gate: a
+    surrogate body IS a valid row-returning candidate to sqlglot, so it would
+    resurface and crash ``compiled_sql_hash`` at prune time. A body SignalForge
+    cannot UTF-8 encode cannot be safely hashed / audited / run, so it is refused
+    here, never a crash.
     """
     body = "select c from t where c = '\ud800'"  # a lone surrogate in a literal
     manifest = _manifest_with(
         _generic_test(unique_id="test.shop.surrogate", compiled_code=body, column_name="amount")
     )
 
-    # No UnicodeEncodeError escapes; the body is handled (skip-recorded), not crashed.
+    # No UnicodeEncodeError escapes; the body is skip-recorded at the size-cap
+    # step (the closed 3-value SkipReason is not grown), not crashed on.
     result = read_manifest_tests(manifest, _make_model())
     assert result.candidate.tests == ()
     assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "malformed-supported-test"
     assert result.skipped[0].reason in _VALID_SKIP_REASONS
 
 
