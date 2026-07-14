@@ -53,13 +53,14 @@ import pytest
 
 from signalforge.draft.models import (
     CandidateTestAcceptedValues,
+    CandidateTestCustomSQL,
     CandidateTestNotNull,
     CandidateTestRelationships,
     CandidateTestUnique,
 )
 from signalforge.manifest.models import Column, Manifest, Model
-from signalforge.prune.compiler import _compile_test
-from signalforge.warehouse.models import SNOWFLAKE_DIALECT, TableRef
+from signalforge.prune.compiler import _compile_test, _InvalidIdentifier
+from signalforge.warehouse.models import BIGQUERY_DIALECT, SNOWFLAKE_DIALECT, TableRef
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from signalforge.draft.models import CandidateTest
@@ -373,3 +374,32 @@ def test_every_anomaly_snowflake_fixture_parses_under_snowflake_dialect(
     sql = (_ANOMALY_SF_FIXTURES_DIR / fixture_name).read_text(encoding="utf-8")
     parsed = sqlglot.parse_one(sql, dialect="snowflake")
     assert parsed is not None
+
+
+def test_compile_ingested_custom_sql_unparseable_under_snowflake_returns_sentinel() -> None:
+    """#270 US-003 DEC-003 (G1) per-dialect pin: a backtick-quoted relation
+    parses under BigQuery (the ingest-side default) but sqlglot's ``snowflake``
+    dialect rejects backtick quoting, so the compiler refuses the body under
+    ``SNOWFLAKE_DIALECT`` → ``_InvalidIdentifier`` → kept-without-evidence, never
+    the always-1 verbatim wrap. Pure ``_compile_test`` — no fakesnow execution."""
+    # BigQuery parses backtick quoting; Snowflake does not.
+    body = "select order_id\nfrom `fake_project`.`dataset`.`orders`\nwhere total < 0"
+    result = _compile_test(
+        CandidateTestCustomSQL(sql=body, from_manifest=True),
+        _make_orders_table_ref(),
+        SNOWFLAKE_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert isinstance(result, _InvalidIdentifier)
+    assert "does not parse under the live warehouse dialect" in result.reason
+    assert "snowflake" in result.reason
+    # Sanity: the SAME body compiles under BigQuery — it is the DIALECT refusing.
+    ok = _compile_test(
+        CandidateTestCustomSQL(sql=body, from_manifest=True),
+        _make_orders_table_ref(),
+        BIGQUERY_DIALECT,
+        _make_manifest(),
+        model=_make_orders_model(),
+    )
+    assert ok == body

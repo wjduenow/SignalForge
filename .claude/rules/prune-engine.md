@@ -262,10 +262,49 @@ Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-lay
   sqlglot` in the compiler** — the classification comes from the ingest helper; the wrap is string-only,
   so this is NOT a new sqlglot importer and needs no confinement scan. A scalar that isn't a prunable
   count (belt-and-braces) → `_InvalidIdentifier` → `kept-without-evidence`. Row-returning bodies still
-  return verbatim. Narrow non-BigQuery cross-dialect classify/compile drift is tracked in #270.
+  return verbatim (**superseded by #270's comment-strip — see below**).
 - **sqlglot extension.** The compiler consumes `signalforge.ingest._compiled_sql` (the 3rd sqlglot
   consumer after `draft/parser` and `ingest/_compiled_sql` itself); the `test_compiler_import_guard`
   (no `google.cloud`/`snowflake` under `prune/`) is unaffected — sqlglot is dialect-neutral parsing.
+
+## Ingested manifest-compiled tests: comment-strip + dialect-refusal (#270, LANDED)
+
+Issue #270 closed the four #267-QG follow-up edges in the `from_manifest` arm of `_compile_custom_sql`. Two of
+them (G2 CTE-classifier, G4 tests-dir asymmetry) live in ingest/docs; the two compiler-side changes:
+
+- **Comment-strip on COMPLETE strings, at the compiler, downstream of the engine's span machinery
+  (DEC-001 — the load-bearing reconciliation).** The arm computes `body = strip_sql_comments(test.sql)`
+  ONCE and uses `body` for EVERY downstream consumer (dialect gate, determinism gate,
+  `validate_ingested_sql`, `is_row_returning`/`is_prunable_count_scalar`, the count-scalar compose, the
+  verbatim source return); the `ingested_sql_override` (#268 sampled rewrite) is stripped separately as its
+  own complete string. This fixes G3 — a comment-bearing dbt `compiled_code` body (the common case) was
+  rejected by the adapter's comment-**intolerant** `validate_test_sql` and always landed
+  `kept-without-evidence`; now it executes and earns a real verdict. **Why strip at the compiler, not the
+  engine:** #268 splices by character spans computed on the UNSTRIPPED `test.sql`; applying those spans to a
+  stripped copy is the DEC-015 injection. The compiler performs NO tokenization/span ops — it only handles
+  complete strings — so a strip there is structurally desync-proof, AND the engine's plan→splice→verify
+  stays on the unstripped body so **#268's `.out.sql` fixtures + `test_ingested_rewrite_parse_guard` are
+  byte-UNCHANGED** (checksum `d1713ba6…` is the tripwire; a changed `.out.sql` byte means the strip leaked
+  into the span path — REVERT it). The audit `compiled_sql` records the stripped bytes (what ran); raw
+  `compiled_code` survives verbatim in the manifest. The warehouse layer + all four adapters stay UNTOUCHED
+  — `validate_test_sql` keeps its strict contract for every other caller; the stripped body simply passes.
+  **Reusable rule: to make a comment-bearing / transformed body pass a strict downstream validator, strip at
+  the LAST stage that handles the complete string, never upstream of a span/offset computation.**
+- **Dialect-refusal gate (DEC-003, G1 correctness).** `parses_under_dialect(body, dialect=dialect.name)` is
+  the FIRST check in the arm; a `False` → `_InvalidIdentifier` → `kept-without-evidence`, so a body that
+  BigQuery-parses at ingest but the live dialect rejects never reaches the always-1 wrap. The CLI
+  (`prune-existing`, US-004) now builds the un-entered adapter BEFORE ingest and threads
+  `adapter.dialect().name` into `read_manifest_tests` (the signal half; `dialect()` is I/O-free on an
+  un-entered adapter — the engine already reads it before its `with adapter:`). But the compiler-side
+  refusal is the correctness backstop and holds regardless of what dialect ingest classified under.
+- **The count-scalar compose gained a `\n` before its closing suffix (DEC-001a)** — belt-and-braces against
+  a trailing-token swallowing `) AS sf_agg_value) AS sf_agg WHERE sf_agg_value <> 0` (the single-line
+  f-string was a latent splice bug masked only by the adapter's comment-reject; fixing G3 unmasked it).
+- **Standing locks held:** no new `DropReason` (5) / `SkipReason` (3) / error class / CLI flag / audit-schema
+  bump / `CandidateTest` variant; **sqlglot importers stay 2** (both new helpers land in the existing
+  `ingest/_compiled_sql.py`; the compiler imports the pure functions). Certified against real BigQuery
+  (`@pytest.mark.bigquery`, maintainer-run) — a comment-bearing body and a count-scalar restructure
+  executing; snapshot/parse-guard certify shape, only the live run certifies the warehouse ACCEPTS the SQL.
 
 ## Sampled manifest-ingested tests (#268)
 

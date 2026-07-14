@@ -135,3 +135,46 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
   **a count is not a proof.** These keep sqlglot in ingest (locate) and out of `prune/` (splice); the
   compiler stays a consumer, so the 2-importer confinement holds. Full contract:
   `prune-engine.md` § "Sampled manifest-ingested tests (#268)".
+
+## Two more analysis helpers + the CTE-cardinality classifier (issue #270)
+
+Issue #270 closed the four #267-QG follow-up edges. All the new machinery lands in the existing
+`ingest/_compiled_sql.py` (stage-0, analysis-only) — **sqlglot importer count stays 2**; the prune
+compiler consumes the helpers, never sqlglot. Three durable additions:
+
+- **`strip_sql_comments(sql) -> str`** — the `_strip_sql_comments` byte-reducer promoted to public (added to
+  `__all__`). String-literal-aware (`'…'`/`"…"`/`` `…` ``, doubled-quote + backslash escapes). It is a
+  byte-**reducing** sanitizer, NOT SQL emission — same stage-0 category as `_strip_string_literals` /
+  `validate_ingested_sql`, so promoting it does not breach the no-SQL-building rule. **Consumed by the prune
+  compiler**, which strips the body it is about to emit so a comment-bearing dbt `compiled_code` survives the
+  adapter's comment-**intolerant** `validate_test_sql` (the G3 fix — see `prune-engine.md`). **Known
+  out-of-scope gap (documented in the docstring, non-exploitable today):** it is NOT Postgres
+  dollar-quote-aware (`$$…$$`); a `--` inside a `$$` body would be stripped. Harmless now (Postgres is a
+  non-executing stub; BQ/SF reject a `$$` body at `parses_under_dialect`), but a future Postgres executor
+  MUST make it dollar-quote-aware first.
+- **`parses_under_dialect(sql, *, dialect="bigquery") -> bool`** — the narrow structural gate (#270 DEC-003)
+  the compiler calls FIRST in its `from_manifest` arm. Catches the SAME `_PARSE_FAILURES` triple
+  (`SqlglotError`/`RecursionError`/`ValueError`) and returns `False` on any failure OR `tree is None` —
+  **conservative-False** (this is a *positive* claim, opposite of the permissive-True gates). A `False` →
+  the compiler's `_InvalidIdentifier` → `kept-without-evidence`, closing the G1 cross-dialect hole where a
+  body BigQuery-parses at ingest but the LIVE dialect rejects it (which would otherwise fall to the always-1
+  wrap). **The refusal cannot be derived from the existing gates** — they collapse parse-failure into a
+  domain verdict, so "did it parse?" needs its own predicate.
+- **CTE/derived-table one-row classifier inside `is_row_returning` (#270 DEC-002, G2).** An additive branch
+  (AFTER the existing root all-collapse check) builds the outermost scope (`build_scope(tree)` on the FULL
+  tree, not the `Subquery`-unwrapped root) and recurses (`_scope_produces_exactly_one_row`, depth-capped 32)
+  through **single-source pass-through** scopes to a base scalar-aggregate scope. A count re-projected
+  through a CTE/derived table (`WITH c AS (SELECT COUNT(*) n FROM t) SELECT n FROM c`) is now proven one-row
+  → `is_row_returning=False` → skip-recorded (`malformed-supported-test`, the closed 3-value `SkipReason`
+  unchanged) instead of the always-1 wrap. **The load-bearing false-positive defence: bail to row-returning
+  on ANY pass-through `WHERE`/`HAVING`/`QUALIFY`/`LIMIT`/`OFFSET`/`DISTINCT` (`_ONE_ROW_REDUCER_KEYS`), any
+  `JOIN`/comma-join, set-op body, multi-source/non-`Table`-`Subquery` FROM, or `PIVOT`/`UNPIVOT`/
+  `TABLESAMPLE`.** This is what spares dbt-expectations' `validation_errors` shell — it ALWAYS filters the
+  re-projected aggregate to 0-or-1 rows via its outer `WHERE`, so it bails and stays prunable. **Reusable
+  lesson: a filter over an aggregate's single output row makes it 0-or-1 (legitimately row-returning); the
+  "provably exactly one row" claim requires no filter AND no multiply on any pass-through hop.** Conservative
+  by construction: unproven → row-returning, and a false one-row verdict only skip-records (never drops).
+  **sqlglot 30.2.1 gotcha (load-bearing): the FROM arg key is `"from_"`, not `"from"`** — use
+  `sel.args.get("from") or sel.args.get("from_")`; hard-coding `"from"` silently disables the whole rule.
+  A CTE-count also returns `is_prunable_count_scalar=False` (not a bare top-level count), so it routes to the
+  existing skip and the compiler's belt-and-braces `_InvalidIdentifier`, never the count-restructure.

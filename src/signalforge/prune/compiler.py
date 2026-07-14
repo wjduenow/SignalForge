@@ -72,6 +72,8 @@ from signalforge.ingest._compiled_sql import (
     is_deterministic_sql,
     is_prunable_count_scalar,
     is_row_returning,
+    parses_under_dialect,
+    strip_sql_comments,
     validate_ingested_sql,
 )
 from signalforge.manifest.errors import (
@@ -760,6 +762,43 @@ def _compile_custom_sql(
         # dispatched against the model's OWN source relation — see the DEC-007
         # fail-closed guard below.
         #
+        # #270 DEC-001 (G3) — strip comments ONCE, on this COMPLETE string, at
+        # the compiler. dbt ``compiled_code`` routinely carries ``--`` / ``/* */``
+        # comments; the adapter's execution-time :func:`validate_test_sql` is
+        # comment-INTOLERANT, so a comment-bearing body — the common case — never
+        # prunes without this. Stripping here (a byte-*reducing* sanitizer, not
+        # SQL emission) emits a comment-free body that passes the strict validator,
+        # so the warehouse layer and all adapters stay untouched. Every downstream
+        # use in this arm reads ``body`` (never ``test.sql``): the dialect-refusal
+        # gate, the determinism gate, the safety scan, the row-returning /
+        # count-scalar checks, the count compose input, and the verbatim
+        # source-bound return — so what we validate is byte-identical to what runs.
+        #
+        # CRITICAL (DEC-001): the compiler strips only COMPLETE strings and does no
+        # sqlglot tokenization or character-span splicing. The engine's
+        # ``_plan_ingested_samples`` / ``_finalise_ingested_plans`` (plan→splice→
+        # verify) operate on the UNSTRIPPED ``test.sql`` — applying spans computed
+        # on ``test.sql`` to a stripped copy would be the #268 DEC-015 injection.
+        # The ``ingested_sql_override`` (the already-spliced+verified rewrite) is
+        # itself a complete string and is stripped separately below.
+        body = strip_sql_comments(test.sql)
+
+        # #270 DEC-003 (G1) — refuse a body the LIVE dialect does not accept,
+        # FIRST, before any permissive gate. Ingest classifies under the
+        # ``"bigquery"`` default; a body that BigQuery-parses but the live
+        # ``dialect.name`` rejects otherwise slips past the permissive-on-parse-
+        # failure verdict of ``is_deterministic_sql`` / ``is_row_returning`` and
+        # falls to the always-1 verbatim wrap, booking evidence for a test the
+        # warehouse would never run. A ``False`` routes it to ``_InvalidIdentifier``
+        # → ``kept-without-evidence`` — the correctness fix, which holds regardless
+        # of what dialect ingest classified under.
+        if not parses_under_dialect(body, dialect=dialect.name):
+            return _InvalidIdentifier(
+                reason=(
+                    "ingested custom_sql does not parse under the live warehouse "
+                    f"dialect ({dialect.name})"
+                )
+            )
         # Determinism belt-and-braces (DEC-012): the ingest bridge (#154 US-003)
         # is the PRIMARY determinism gate (it skip-records TABLESAMPLE / RAND /
         # NOW / … bodies), but a non-deterministic body reaching the compiler
@@ -769,21 +808,18 @@ def _compile_custom_sql(
         # a Snowflake / Databricks compiled body parses under the right dialect —
         # otherwise a parse failure returns the permissive (deterministic=True)
         # verdict and a non-deterministic construct could slip through this gate.
-        if not is_deterministic_sql(test.sql, dialect=dialect.name):
+        if not is_deterministic_sql(body, dialect=dialect.name):
             return _InvalidIdentifier(
                 reason=(
                     "ingested custom_sql is non-deterministic "
                     "(TABLESAMPLE / RAND / time-dependent function)"
                 )
             )
-        # Comment-tolerant safety scan (DEC-013): dbt ``compiled_code`` routinely
-        # carries ``--`` line comments and ``/* */`` block comments that the
-        # ``#116`` :func:`validate_test_sql` rejects wholesale. The ingested
-        # validator strips them (string-literal-aware) before the ``;`` /
-        # unbalanced-paren injection scan, so a genuine injection still fails
-        # loud → ``_InvalidIdentifier`` → ``kept-without-evidence``.
+        # Comment-tolerant safety scan (DEC-013): the ``;`` / unbalanced-paren
+        # injection scan. ``body`` is already comment-free, so a genuine injection
+        # still fails loud → ``_InvalidIdentifier`` → ``kept-without-evidence``.
         try:
-            validate_ingested_sql(test.sql)
+            validate_ingested_sql(body)
         except QuerySyntaxError:
             return _InvalidIdentifier(
                 reason="ingested custom_sql rejected by the comment-tolerant SQL safety scan"
@@ -812,7 +848,7 @@ def _compile_custom_sql(
         # ``1`` ALWAYS regardless of the count's value — the same always-1 bug
         # ``_compile_row_count_between`` was corrected for (US-007a). A
         # row-returning body is faithful under the envelope and returns verbatim.
-        if not is_row_returning(test.sql, dialect=dialect.name):
+        if not is_row_returning(body, dialect=dialect.name):
             # #268 DEC-003 — a count-of-rows scalar is NEVER sampled: an aggregate
             # over a hash-mod'd sample is semantically meaningless
             # (``business-rule-tests.md`` Direction-2), so the engine keeps it
@@ -822,7 +858,7 @@ def _compile_custom_sql(
             # count) as evidence. #267's verdicts at source are unchanged.
             if not is_source_table_ref:
                 return _InvalidIdentifier(reason=_INGESTED_UNBOUND_REASON)
-            if is_prunable_count_scalar(test.sql, dialect=dialect.name):
+            if is_prunable_count_scalar(body, dialect=dialect.name):
                 # DEC-002 — a single top-level COUNT-family scalar is soundly
                 # re-interpretable as a failing-rows count (dbt convention:
                 # returned rows = failures; a ``COUNT(*) [WHERE cond]`` scalar's
@@ -834,10 +870,17 @@ def _compile_custom_sql(
                 # confinement scan); the body carries its own dialect quoting and
                 # only dialect-neutral literals wrap it (validated on BQ/SF/DB).
                 # Mirrors ``_compile_row_count_between``'s failing-rows contract.
+                #
+                # #270 DEC-001a (the §1.4 splice bug) — a ``\n`` precedes the
+                # closing suffix so trailing body content can never swallow it.
+                # ``body`` is already comment-stripped, so this is belt-and-braces
+                # (a bare ``--`` tail is gone), but the newline makes a
+                # single-line body physically unable to comment out
+                # ``) AS sf_agg_value) AS sf_agg WHERE sf_agg_value <> 0``.
                 composed = (
-                    "SELECT sf_agg_value FROM "
-                    f"(SELECT ({test.sql}) AS sf_agg_value) AS sf_agg "
-                    "WHERE sf_agg_value <> 0"
+                    "SELECT sf_agg_value FROM (SELECT (\n"
+                    f"{body}\n"
+                    ") AS sf_agg_value) AS sf_agg WHERE sf_agg_value <> 0"
                 )
                 # Re-run the comment-tolerant safety scan on the COMPOSED SQL so a
                 # pathological body that only becomes injection-shaped once wrapped
@@ -874,7 +917,14 @@ def _compile_custom_sql(
             # neither a non-deterministic construct nor an injection — but the two
             # gates are cheap and total, and they are what keeps the safety
             # contract from being bypassable by a single engine-side mistake.
-            if not is_deterministic_sql(ingested_sql_override, dialect=dialect.name):
+            #
+            # #270 DEC-001 (G3) — strip comments from the OVERRIDE separately: it
+            # is itself a COMPLETE string (already spliced + verified by the engine
+            # on the UNSTRIPPED ``test.sql``), so stripping it here does no span
+            # operation and cannot desync the #268 splice offsets. The stripped
+            # bytes are what the adapter's comment-intolerant validator must accept.
+            override_body = strip_sql_comments(ingested_sql_override)
+            if not is_deterministic_sql(override_body, dialect=dialect.name):
                 return _InvalidIdentifier(
                     reason=(
                         "relation-rewritten ingested custom_sql is non-deterministic "
@@ -882,7 +932,7 @@ def _compile_custom_sql(
                     )
                 )
             try:
-                validate_ingested_sql(ingested_sql_override)
+                validate_ingested_sql(override_body)
             except QuerySyntaxError:
                 return _InvalidIdentifier(
                     reason=(
@@ -890,14 +940,16 @@ def _compile_custom_sql(
                         "comment-tolerant SQL safety scan"
                     )
                 )
-            return ingested_sql_override
+            return override_body
 
         # #268 DEC-007 — no verified rewrite in hand, so the body may ONLY be
         # dispatched when it is bound to the model's own source relation. Every
         # other binding refuses (see ``is_source_table_ref`` above).
         if not is_source_table_ref:
             return _InvalidIdentifier(reason=_INGESTED_UNBOUND_REASON)
-        return test.sql
+        # Return the comment-stripped ``body`` (#270 DEC-001), not raw ``test.sql``:
+        # the adapter's execution-time ``validate_test_sql`` is comment-intolerant.
+        return body
 
     if model is None:
         # The orchestrator must thread ``model`` for custom_sql resolution.

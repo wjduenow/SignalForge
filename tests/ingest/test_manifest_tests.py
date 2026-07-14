@@ -196,6 +196,31 @@ def test_non_count_aggregate_body_still_skips() -> None:
     assert "#267" in skip.detail
 
 
+def test_cte_reprojected_count_scalar_is_skip_recorded() -> None:
+    """A count re-projected through a CTE is one row → skip-recorded (#270 US-002).
+
+    ``WITH c AS (SELECT COUNT(*) n FROM orders) SELECT n FROM c`` is cardinality-1
+    (``is_row_returning`` now returns ``False``) but is NOT a bare top-level count
+    (``is_prunable_count_scalar`` returns ``False``), so it routes to the EXISTING
+    ``malformed-supported-test`` skip via the reader's
+    ``not is_row_returning and not is_prunable_count_scalar`` gate — no new
+    ``SkipReason`` (the closed 3-value Literal stays closed) and no reader change.
+    """
+    manifest = _manifest_with(
+        _generic_test(
+            unique_id="test.shop.cte_count",
+            compiled_code="with c as (select count(*) as n from orders) select n from c",
+            macro="expect_table_row_count_to_equal",
+        )
+    )
+    result = read_manifest_tests(manifest, _make_model())
+
+    assert result.candidate.tests == ()
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip.reason == "malformed-supported-test"
+
+
 def test_nondeterministic_count_scalar_still_skips() -> None:
     """A count-of-rows scalar with a non-deterministic body still skips.
 

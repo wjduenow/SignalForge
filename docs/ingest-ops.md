@@ -74,15 +74,18 @@ Import from `signalforge.ingest`.
   `custom_sql` candidates by reading each node's already-Jinja-resolved
   `compiled_code` (issue #154; see
   [Recognition of dbt-compiled manifest tests](#recognition-of-dbt-compiled-manifest-tests)).
-  `dialect` is the sqlglot dialect the gates below parse `compiled_code` under;
-  pass the active warehouse dialect (`adapter.dialect().name`) when you have one
-  so the ingest gates and the prune compiler agree on a body (#268). A
-  disagreement cannot produce a wrong verdict — not because the gates are
-  strictly more conservative (they are *permissive* on a parse failure, so a
-  mismatch could admit a body rather than skip-record it), but because the
-  downstream prune compilation stays **fail-closed**: a body the compiler
-  cannot safely rewrite/validate under the real dialect routes to
-  `kept-without-evidence`. The disagreement can cost signal, never correctness.
+  `dialect` is the sqlglot dialect the gates below parse `compiled_code` under.
+  `signalforge prune-existing` threads the active warehouse dialect
+  (`adapter.dialect().name`) here automatically (#270), so the ingest gates and
+  the prune compiler classify each body under the **same** dialect; the default
+  stays `"bigquery"` for other/future callers. A disagreement cannot produce a
+  wrong verdict — not because the gates are strictly more conservative (they are
+  *permissive* on a parse failure, so a mismatch could admit a body rather than
+  skip-record it), but because the downstream prune compilation stays
+  **fail-closed**: as of #270 the compiler **refuses** an ingested body that does
+  not parse under the live dialect, routing it to `kept-without-evidence` before
+  the always-`failures=1` wrap can fire (see
+  [`docs/prune-ops.md` § Comment-tolerant validation](prune-ops.md#comment-tolerant-validation)).
 
 The `schema` argument is overloaded **by type** — this str-vs-`Path` split
 is the contract:
@@ -546,6 +549,50 @@ a count (`COUNT(*) + 1`) carries no such "returned rows = failures" convention
 `SkipReason` (`unsupported-test-type` / `custom-or-generic-test` /
 `malformed-supported-test`) is unchanged; #267 only narrows *which* bodies
 route to it.
+
+### CTE-reprojected count scalars are skip-recorded (#270)
+
+The #267 count-of-rows detection matches a count at the **top level** of the
+outer `SELECT`. A count wrapped behind a CTE or derived-table re-projection —
+`WITH c AS (SELECT COUNT(*) n FROM t) SELECT n FROM c` — has a plain column in
+its outer projection, so it reads as *row-returning* and slipped past #267's
+detection; wrapped verbatim in the adapter's
+`SELECT COUNT(*) AS failures FROM (<sql>)` envelope it reports `failures=1`
+regardless of the count — a silent always-`kept`. As of #270 the row-returning
+gate proves exactly-one-row cardinality *through* such re-projections (sqlglot-AST,
+depth-capped) and **skip-records** the body as `malformed-supported-test` rather
+than booking a wrong verdict.
+
+The predicate is conservative by construction: a hop carrying **any**
+pass-through `WHERE` / `HAVING` / `QUALIFY` / `LIMIT` / `OFFSET` / `DISTINCT`,
+any `JOIN` or comma-join, a set-op body, a multi-source `FROM`, or a
+`PIVOT` / `UNPIVOT` / `TABLESAMPLE` **bails to row-returning**. That is exactly
+what spares dbt-expectations' `validation_errors` shell (and the `dbt_utils`
+`recency` / `max_recency` shape): both filter the re-projected aggregate to
+0-or-1 rows with a `WHERE`, which is *legitimately* row-returning and stays
+pruned. Any body not **provably** one-row stays row-returning, and a false
+one-row verdict only ever skip-records — it never drops a test — so the
+conservative default is safe. The closed 3-value `SkipReason` is unchanged.
+
+### `--tests-dir` singular count scalars keep dbt's semantics — by design (#270)
+
+The #267 count-of-rows reinterpretation (`0 = pass`) applies **only** to
+manifest-ingested bodies (`from_manifest=True`). A hand-authored singular test
+under `tests/*.sql` (read via
+[`read_test_files`](#singular-testssql-tests); `from_manifest=False`) that is a
+bare `SELECT count(*) …` is deliberately **not** reinterpreted — it keeps dbt's
+own semantics. A dbt singular test signals failures by *returning rows*, so a
+bare `select count(*)` returns one value row and dbt scores it as **always
+failing**, every run, regardless of the count. SignalForge's always-`kept`
+verdict on such an operator-authored file is *faithful* to that. Reinterpreting
+the file (the `0 = pass` restructure) could **drop** a test dbt fails every run
+— strictly worse than the status quo — so the asymmetry with the manifest path
+is intentional (#270 DEC-004).
+
+`from_manifest` is the mandated discriminator between ingested and authored
+tests, and a tests-dir test is legitimately not `from_manifest`. If you want the
+reject-table `0 = pass` reading for such a check, author it as a row-returning
+test (`SELECT * … WHERE <offending>`) rather than a bare count.
 
 ### Macro identity travels into the diff `why`
 

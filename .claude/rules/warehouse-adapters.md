@@ -164,6 +164,8 @@ GCP **project IDs** use a different hyphen-permissive grammar — route those th
 
 `run_test_sql(sql)` does NOT parse SQL. Runs cheap rejects (`;`, `--`, unbalanced parens) inside `_sql_safety` and documents the contract: callers must supply a single SELECT returning rows. Full SQL parsing is overkill — the LLM drafter is the practical caller and we control the prompt.
 
+**The strict `validate_test_sql` (comment-**intolerant**) is NOT relaxed for foreign-rendered dbt `compiled_code` (#270).** dbt `compiled_code` "we control the prompt" is false — it routinely carries `--` / `/* */` comments, which `validate_test_sql` rejects at `run_test_sql`. The fix keeps the adapter contract STRICT and satisfies it upstream: the prune compiler's `from_manifest` arm strips comments from the body it emits (`ingest.strip_sql_comments`), so the body reaching `run_test_sql` is already comment-free. Do NOT reach for comment-tolerance at the adapter — the blast radius is every `run_test_sql` / `run_stats_query` / `estimate_query_bytes` caller; strip at the producing compiler instead. See `prune-engine.md` § "Ingested manifest-compiled tests: comment-strip + dialect-refusal (#270)".
+
 ## `QueryJobConfig` originates in `_default_job_config` (DEC-015)
 
 Every query the adapter issues builds config through one private helper:
