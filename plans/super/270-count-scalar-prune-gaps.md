@@ -5,8 +5,9 @@
 | Field | Value |
 |---|---|
 | Ticket | [#270](https://github.com/wjduenow/SignalForge/issues/270) |
-| Phase | `published` |
+| Phase | `devolved` |
 | PR | [#272](https://github.com/wjduenow/SignalForge/pull/272) |
+| Epic | `bd_1-scaffolding-byx` |
 | Branch | `feature/270-count-scalar-prune-gaps` |
 | Worktree | `../worktrees/SignalForge/270-count-scalar-prune-gaps` |
 | Base | `dev` (at `f0bb1a6`, i.e. **after** #154 / #267 / #268) |
@@ -334,4 +335,18 @@ the "strip complete strings downstream of the span machinery" reconciliation and
 
 ## 6. Beads Manifest
 
-_(pending devolve)_
+- **Epic:** `bd_1-scaffolding-byx`
+- **Worktree:** `../worktrees/SignalForge/270-count-scalar-prune-gaps` (branch `feature/270-count-scalar-prune-gaps`)
+
+| Task | Story | Depends on |
+|---|---|---|
+| `bd_1-scaffolding-byx.1` | US-001 ingest helpers | — |
+| `bd_1-scaffolding-byx.2` | US-002 CTE classifier | .1 (serialize — same file) |
+| `bd_1-scaffolding-byx.3` | US-003 compiler wiring | .1, .2 |
+| `bd_1-scaffolding-byx.4` | US-004 CLI dialect wiring | .1, .3 |
+| `bd_1-scaffolding-byx.5` | US-005 live BigQuery e2e | .2, .3, .4 |
+| `bd_1-scaffolding-byx.6` | US-006 docs + CHANGELOG | .2, .3, .4 |
+| `bd_1-scaffolding-byx.7` | Quality Gate | .1–.6 |
+| `bd_1-scaffolding-byx.8` | Patterns & Memory | .7 |
+
+Ready to start: `.1`. US-001 and US-002 edit the same file — never run them concurrently.
