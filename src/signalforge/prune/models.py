@@ -109,6 +109,32 @@ class PruneDecision(BaseModel):
     compiled_sql: str
     why: str
     sample_failures: tuple[dict[str, Any], ...] | None = None
+    bypassed_to_source: bool = False
+    """Whether this test was routed PAST the sample to the source table
+    (issue #268, DEC-011).
+
+    :attr:`scope` is copied verbatim from ``prune.scope``, so a test that
+    bypassed the sample is still recorded as ``scope="sample"`` — and its
+    :attr:`why` may even read "on 0 sample rows". Without this field a
+    genuinely **sampled** test and a **bypassed** one are indistinguishable
+    to a reviewer, which cuts against Architectural Commitment #5
+    ("explainable diffs").
+
+    ``True`` for the metadata-aggregate variants under a sample scope
+    (``row_count_between`` / ``unique_combination`` /
+    ``row_count_anomaly_by_period`` — which have silently carried this lie
+    since #169: a ``COUNT(*)`` against a sample is semantically meaningless,
+    so they always bypass) and for a manifest-ingested ``custom_sql`` whose
+    body could not be safely rewritten onto the sample relation. ``False``
+    under ``scope="full"`` (there is no sample to bypass), for row-level
+    tests that genuinely ran against the sample, and for decisions taken
+    before any routing happened (prune disabled, budget exhausted, sample
+    materialisation failed).
+
+    Set at the decision site in :mod:`signalforge.prune.engine` from the
+    same :func:`~signalforge.prune.engine._test_requires_source_table`
+    predicate that computes the per-test table ref, so the audit field and
+    the actual routing cannot drift."""
     as_of: date | None = None
     """Evaluation date for time-bound prune decisions (issue #171, DEC-006).
 
@@ -167,6 +193,7 @@ class PruneDecision(BaseModel):
             f"reason={self.reason!r}, "
             f"failures={self.failures}, "
             f"scope={self.scope!r}, "
+            f"bypassed_to_source={self.bypassed_to_source}, "
             f"elapsed_ms={self.elapsed_ms})"
         )
 
@@ -187,6 +214,7 @@ class PruneDecision(BaseModel):
             ("reason", self.reason),
             ("failures", self.failures),
             ("scope", self.scope),
+            ("bypassed_to_source", self.bypassed_to_source),
             ("elapsed_ms", self.elapsed_ms),
         ]
 

@@ -230,3 +230,13 @@ did not render itself (regex false-positives on a `random_id` column; a scalar w
 remains documented, not gated); `tests/prune/test_compiler_import_guard.py` still passes (it forbids
 `google.cloud`/`snowflake` under `prune/`, not sqlglot). If a FOURTH sqlglot importer lands, promote
 the convention to a real confinement scan.
+
+**#268 deliberately stayed at 2 importers.** Sampling manifest-ingested tests needed sqlglot AST
+relation-rewriting — the exact "hardest sqlglot component" the ticket flagged — but the work split
+**locate-in-ingest / splice-in-compiler**: `signalforge.ingest._compiled_sql` grew the analysis helpers
+(`plan_relation_rewrite` / `verify_relation_rewrite`, both parse-and-return-data), and
+`signalforge.prune.compiler` did the rewrite as a **pure string splice** over the returned character
+spans — no `import sqlglot`. So the compiler stayed a CONSUMER, no 4th importer landed, and no confinement
+scan is owed. This is the reusable answer whenever a `prune/`-side transform needs sqlglot: put the parse
+in ingest (stage-0 analysis, returns spans/verdicts), keep the string emission in the compiler. Verified
+by `grep -rn '^import sqlglot\|^from sqlglot' src/` → still only `draft/parser.py` + `ingest/_compiled_sql.py`.

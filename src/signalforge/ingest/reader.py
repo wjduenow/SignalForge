@@ -40,7 +40,7 @@ from __future__ import annotations
 import re
 from hashlib import blake2b
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
 
@@ -74,6 +74,18 @@ from signalforge.manifest import GenericTest, Manifest, Model, associate_test_mo
 # (diff-renderer DEC-006 uses ~5 MB) — a single model's schema.yml block is
 # kilobytes; 5 MB is generous headroom while still bounding the attack surface.
 _INGEST_SCHEMA_SIZE_LIMIT_BYTES = 5_000_000
+
+# #268 DEC-012(2) — size cap on a manifest test node's ``compiled_code``,
+# checked BEFORE any sqlglot parse. The 5 MB cap above guards *file* reads
+# (``read_schema`` / ``read_test_files``) only; ``read_manifest_tests`` takes an
+# already-parsed ``Manifest``, so a pathological body (a dbt-utils ``equality``
+# on a 400-column model, an unrolled ``accepted_values`` with thousands of
+# literals) previously reached sqlglot unbounded. 256 KiB sits far above any
+# realistic dbt-expectations / dbt-utils compiled body (the largest observed are
+# single-digit KB) and far below anything that stresses the parser. An over-cap
+# body is skip-recorded (``malformed-supported-test`` — the CLOSED 3-value
+# ``SkipReason``, never grown), never a hard abort.
+_COMPILED_CODE_SIZE_LIMIT_BYTES: Final[int] = 262_144
 
 
 def read_schema(
@@ -519,6 +531,23 @@ _NONDETERMINISTIC_SKIP_DETAIL = (
     "NOW / UUID / …): the prune verdict would not be reproducible, violating "
     "explainable-diffs."
 )
+# #268 DEC-012(2) — the over-cap disposition. Routed to the existing
+# ``malformed-supported-test`` (structurally unusable: the body is never parsed,
+# so no verdict can be reached); the closed 3-value ``SkipReason`` is NOT grown.
+_OVERSIZE_SKIP_DETAIL = (
+    f"compiled_code exceeds the {_COMPILED_CODE_SIZE_LIMIT_BYTES}-byte ingest cap "
+    "and was not parsed. A body this large is far outside the realistic "
+    "dbt-expectations / dbt-utils range; parsing it unbounded risks exhausting "
+    "the parser. Narrow the test (e.g. fewer columns on a dbt_utils.equality) or "
+    "drop it."
+)
+
+_UNENCODABLE_SKIP_DETAIL = (
+    "compiled_code is not valid UTF-8 (it carries a lone surrogate, likely from a "
+    "corrupt or hand-edited manifest.json). SignalForge cannot hash, audit or run "
+    "a body it cannot encode, so it is skip-recorded rather than aborting the run. "
+    "Re-run `dbt compile` to regenerate the manifest."
+)
 
 
 def read_manifest_tests(
@@ -526,6 +555,7 @@ def read_manifest_tests(
     model: Model,
     *,
     project_dir: Path | None = None,
+    dialect: str = "bigquery",
 ) -> IngestResult:
     """Bridge dbt-compiled manifest test nodes for ``model`` into an ``IngestResult``.
 
@@ -555,6 +585,10 @@ def read_manifest_tests(
     * ``compiled_code`` that fails the comment-tolerant safety scan
       (:func:`~signalforge.ingest._compiled_sql.validate_ingested_sql`) →
       ``malformed-supported-test``.
+    * ``compiled_code`` over :data:`_COMPILED_CODE_SIZE_LIMIT_BYTES` →
+      ``malformed-supported-test``, checked BEFORE any sqlglot parse (#268
+      DEC-012(2)). ``read_manifest_tests`` takes an already-parsed ``Manifest``,
+      so the file-read cap that guards ``read_schema`` never applies here.
 
     When EVERY associated node lacks ``compiled_code`` a single summary
     :class:`SkippedTest` is prepended (DEC-010) so the operator gets one
@@ -579,6 +613,15 @@ def read_manifest_tests(
         project_dir: Accepted for adjacent-stage signature parity
             (``read_schema`` / ``prune_tests`` / ``grade_artifacts``); this
             bridge does no path I/O, so it is unused.
+        dialect: The sqlglot dialect name the classification gates parse
+            ``compiled_code`` under (#268 DEC-013). Defaults to ``"bigquery"``,
+            preserving pre-#268 behaviour for callers that have no adapter in
+            hand. Callers that DO know the live warehouse should pass
+            ``adapter.dialect().name`` — the prune compiler parses the same body
+            under the live dialect, and two parses under *different* dialects can
+            disagree, which would let the engine and the compiler reach opposite
+            verdicts on the same test. An unknown name does not raise: every gate
+            degrades to its conservative verdict.
 
     Returns:
         An :class:`IngestResult` whose ``candidate`` is a model-level-only
@@ -597,7 +640,7 @@ def read_manifest_tests(
     tests: list[CandidateTest] = []
     skipped: list[SkippedTest] = []
     for test in associated:
-        outcome = _classify_manifest_test(test)
+        outcome = _classify_manifest_test(test, dialect=dialect)
         if isinstance(outcome, SkippedTest):
             skipped.append(outcome)
         else:
@@ -630,15 +673,23 @@ def _has_compiled_code(test: GenericTest) -> bool:
     return test.compiled_code is not None and test.compiled_code.strip() != ""
 
 
-def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | SkippedTest:
+def _classify_manifest_test(
+    test: GenericTest, *, dialect: str = "bigquery"
+) -> CandidateTestCustomSQL | SkippedTest:
     """Route one associated manifest test node to a candidate or a skip record.
 
     The gate order is deliberate (cheapest / most-specific first): presence →
-    row-returning-or-count-scalar → deterministic → comment-tolerant safety scan.
-    The first failing gate wins; only a body that clears every gate becomes a
-    :class:`CandidateTestCustomSQL`. A scalar (one-row) body clears the second
-    gate only when it is a graduatable count-of-rows scalar (#267 DEC-003) — a
-    non-count scalar skip-records ``malformed-supported-test``.
+    **size cap** → row-returning-or-count-scalar → deterministic →
+    comment-tolerant safety scan. The first failing gate wins; only a body that
+    clears every gate becomes a :class:`CandidateTestCustomSQL`. A scalar
+    (one-row) body clears the third gate only when it is a graduatable
+    count-of-rows scalar (#267 DEC-003) — a non-count scalar skip-records
+    ``malformed-supported-test``.
+
+    The size cap (#268 DEC-012(2)) precedes every sqlglot gate so a pathological
+    body is never handed to the parser. ``dialect`` (#268 DEC-013) is threaded
+    into each sqlglot gate so the ingest verdict is reached under the same
+    dialect the prune compiler will use.
     """
     label = _macro_label(test)
     cc = test.compiled_code
@@ -649,20 +700,48 @@ def _classify_manifest_test(test: GenericTest) -> CandidateTestCustomSQL | Skipp
             reason="custom-or-generic-test",
             detail=_MISSING_COMPILED_CODE_DETAIL,
         )
+    # #268 DEC-012(2) — bound the body BEFORE any sqlglot parse. Byte length (not
+    # character count) so a multi-byte payload cannot smuggle past the cap.
+    # The encode ALSO screens un-encodable bodies: a lone surrogate from a
+    # manifest JSON escape (``\ud800``) raises ``UnicodeEncodeError`` — not a
+    # ``_PARSE_FAILURES`` type, so it would escape this stage-0 reader and abort
+    # the whole prune run (the class of bug US-001 closed for the sqlglot gates).
+    # It cannot be skipped by encoding through it, either: a surrogate body IS a
+    # valid row-returning candidate to sqlglot, so it would resurface and crash
+    # `compiled_sql_hash` at prune time. A body SignalForge cannot UTF-8 encode
+    # cannot be safely hashed / audited / run, so skip-record it here.
+    try:
+        body_byte_len = len(cc.encode("utf-8"))
+    except UnicodeEncodeError:
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=_UNENCODABLE_SKIP_DETAIL,
+        )
+    if body_byte_len > _COMPILED_CODE_SIZE_LIMIT_BYTES:
+        return SkippedTest(
+            test_name=label,
+            column=test.column_name,
+            reason="malformed-supported-test",
+            detail=_OVERSIZE_SKIP_DETAIL,
+        )
     # A scalar (one-row) body only skips when it is NOT a graduatable
     # count-of-rows scalar (#267 DEC-003/DEC-005). A COUNT(*) / COUNT(col) /
     # COUNT(DISTINCT col) scalar is soundly re-interpretable as a failing-rows
     # count, so it FALLS THROUGH to the common determinism → safety → candidate
     # tail (carrying the compiled body verbatim — the compiler, not ingest, does
     # the COUNT-wrap restructure). A non-count scalar still skip-records.
-    if not is_row_returning(cc) and not is_prunable_count_scalar(cc):
+    if not is_row_returning(cc, dialect=dialect) and not is_prunable_count_scalar(
+        cc, dialect=dialect
+    ):
         return SkippedTest(
             test_name=label,
             column=test.column_name,
             reason="malformed-supported-test",
             detail=_AGGREGATE_SKIP_DETAIL,
         )
-    if not is_deterministic_sql(cc):
+    if not is_deterministic_sql(cc, dialect=dialect):
         return SkippedTest(
             test_name=label,
             column=test.column_name,

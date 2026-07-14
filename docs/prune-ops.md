@@ -234,27 +234,113 @@ boolean on the candidate — `from_manifest` — distinguishes them:
   routes to the same five `DropReason` literals. No new drop reason; no 7th
   test variant.
 
-Two routing details are specific to the manifest-ingested path:
+The manifest-ingested path has its own routing, validation and cost story —
+the subsections below cover it.
 
-**Full-scope, always (DEC-007).** A manifest-ingested body is evaluated
-against the **source production table at `scope="full"`**, regardless of the
-configured or `--scope`-requested scope. dbt renders the relation with its
-*own* quoting (e.g. `` `proj`.`ds`.`tbl` `` on BigQuery — three backtick
-pairs), which matches neither substitution token the `{{ this }}`
-sample-CTE rewrite looks for. Under `scope="sample"` the substitution would
-silently no-op and every ingested test would degrade to
-`kept-without-evidence`, so the engine bypasses sampling for these candidates
-and runs them full-scope against the source instead. If you requested
-`--scope=sample`, the engine emits **one INFO line** naming the model +
-ingested-test count and proceeds full-scope; `maximum_bytes_billed` still
-caps cost (you opted in via `--from-manifest`). This is the same
-metadata/aggregate source-table routing `row_count_between` /
-`unique_combination` / `row_count_anomaly_by_period` use, centralised in the
-`_test_requires_source_table` helper — a *drafted* `custom_sql` is **not**
-bypassed. sqlglot-AST relation-rewriting for true sampling of ingested tests
-is a tracked follow-up (#268).
+#### Sampling an ingested body: relation-rewriting, and the gates it must clear (#268)
 
-**Comment-tolerant validation.** dbt's `compiled_code` routinely carries `--`
+dbt renders the model's relation with its *own* quoting (e.g.
+`` `proj`.`ds`.`tbl` `` on BigQuery — three backtick pairs), which matches
+neither substitution token the `{{ this }}` sample-CTE rewrite looks for. A
+string substitution cannot find a relation it did not itself render, so #154
+routed **every** ingested body to the source table at `scope="full"`,
+whatever scope you asked for.
+
+Issue **#268** lifts that for the common case: the engine locates the model's
+own relation in the compiled body via **sqlglot AST analysis** and splices
+each reference to the materialised `_SESSION._sf_sample_*` temp table with a
+byte-preserving token splice (dbt's comments, indentation and blank lines
+survive intact outside the spliced spans). A body must clear **every** gate
+below to be sampled — any failure routes it back to the source table at full
+scope, i.e. exactly the #154 behaviour:
+
+| Gate | Why |
+|---|---|
+| `prune.scope: sample` **and** `prune.sample_strategy: materialised` | The rewrite needs a temp table to point *at*. **`oneshot` still routes ingested tests to source** — the CTE-based alternative it would need was prototyped and failed on execution (a CTE may only reference *earlier* CTEs, and sqlglot cannot prepend one). Deferred. |
+| `from_manifest` | A *drafted* `custom_sql` keeps the `{{ this }}` substitution path, byte-unchanged. |
+| Row-returning | A **#267 count-of-rows scalar is an aggregate** — `COUNT(*)` over a hash-mod'd sample returns the *sample size*, not the real count. Count-scalars keep running against the source; #267's verdicts are unchanged. |
+| Exactly **one** physical relation, and it is the model's own | Enforced on the AST, never a `JOIN` regex (which misses comma-joins, correlated subqueries and `NOT EXISTS`). Sampling one leg of a join can produce a **false pass → `always-passes` → a real test deleted**. |
+| No CTE alias collides with the relation | A CTE aliased with the model's (possibly dotted) name would otherwise have its *reference* rewritten to the temp table — plausibly zero rows, same false-pass outcome. |
+| The spliced SQL passes an **AST post-condition** | The rewrite is re-parsed and must (a) parse clean, (b) contain **zero** residual references to the source relation, (c) contain exactly *N* references to the temp table. A count of matched tokens is *not* an integrity proof — the proof is on the rewritten AST. |
+| **≥ 2** samplable ingested candidates in the batch | The cost model — see below. |
+
+A body that fails a gate is not an error: it keeps its pre-#268 routing (source
+table, full scope, `maximum_bytes_billed` as the cost guardrail — you opted in
+via `--from-manifest`). The `DropReason` literal set is **still 5-valued**; no
+new error class, no new flag, no new test variant. Only a body that genuinely
+cannot be *evaluated* routes to `kept-without-evidence`, as before.
+
+**The compiler fails closed independently of the engine.** If an ingested body
+is ever handed a `table_ref` that is not the model's own source relation *and*
+no verified rewrite came with it, the compiler refuses it
+(`kept-without-evidence`) rather than dispatch dbt's production-quoted SQL
+against a run the engine has booked as `scope="sample"`. That would be a silent
+full scan of production recorded as evidence — and an `always-passes` verdict
+from it would drop a real test.
+
+#### Cost model — why the ≥ 2 gate exists
+
+The materialisation CTAS is a `SELECT *` (plus a whole-row hash), so it reads
+**every column** of the model. A narrow ingested test running against the source
+is column-pruned by the warehouse. The break-even is roughly
+`N × test_column_bytes > table_bytes` — so a **single** samplable ingested test
+can never pay for the CTAS, and the engine keeps it bypassing to source.
+
+**The ≥ 2 gate is a coarse heuristic, not a break-even guarantee.** It rules out
+the always-losing single-test case, but it does **not** prove the CTAS pays for
+itself at exactly two: two narrow tests on a very wide table can still be cheaper
+run column-pruned at source than one whole-table `SELECT *` CTAS + two sampled
+scans. A precise decision would compare the estimated CTAS bytes against the
+summed per-test source bytes, which the engine does not do today (it has no
+per-candidate byte estimate at routing time). If your ingested tests are narrow
+and your models are very wide, prefer `--scope full` for the ingested pass, or
+raise the effective threshold by pruning fewer models per run. A cost-aware gate
+is tracked as a follow-up.
+
+Two consequences worth planning for:
+
+- A `--from-manifest` run at `--scope=sample --sample-strategy materialised`
+  with ≥ 2 samplable bodies now **materialises a temp table where it previously
+  did none** — a real (bounded, one-off) cost that pre-#268 runs did not pay.
+  Wide tables with few ingested tests are the case to watch; `--scope=full` (or
+  `--sample-strategy oneshot`) restores the old behaviour exactly.
+- If `materialise_sample` fails (e.g. `SamplingRequiresPartitionFilterError` /
+  `UnknownTableSizeError` on a >100M-row unpartitioned table) and **nothing in
+  the batch genuinely needs the sample** — every candidate is either a
+  bypass-to-source variant or a samplable ingested body, which has a perfectly
+  good full-scope form — the engine **falls back to the source at full scope and
+  keeps going**, emitting one WARNING carrying `"fallback": "source"`. You get N
+  real verdicts, not N `kept-without-evidence`. Only a *drafted* row-level test
+  in the batch (which has no source fallback) still routes the whole batch to
+  `kept-without-evidence`.
+
+#### Observability — one INFO, plus DEBUG breadcrumbs
+
+The #154 INFO (`scope=sample requested; evaluating full-scope against source`)
+is **gone** — it became a lie the moment some ingested bodies started being
+sampled. On any `scope="sample"` run carrying at least one ingested candidate
+the engine now emits **one aggregate INFO** per `prune_tests` call:
+
+    ingested custom_sql routing: {"model_unique_id": "...", "sample_strategy":
+    "materialised", "ingested_count": 7, "sampled_count": 5,
+    "bypassed_to_source_count": 2, "bypass_reasons": {"aggregate-scalar": 1,
+    "multi-relation": 1}}
+
+`bypass_reasons` is a `{reason: count}` histogram over a closed reason set
+(`unparseable`, `zero-match`, `multi-relation`, `cte-alias-collision`,
+`span-mismatch`, `aggregate-scalar`, `below-min-samplable`,
+`materialisation-failed`, `verify-failed`, `strategy-not-materialised`), sorted
+so two runs over the same batch log byte-identical JSON. Each bypassed candidate
+also gets a **DEBUG** breadcrumb naming its `test_anchor` + reason — DEBUG, not
+INFO, because a wide model with 40 ingested tests would otherwise emit 40 INFO
+lines. A `scope="full"` run stays log-silent, as before.
+
+Whether an individual test was sampled or bypassed is durably recorded on its
+audit record: see [`bypassed_to_source`](#audit-jsonl-schema).
+
+#### Comment-tolerant validation
+
+dbt's `compiled_code` routinely carries `--`
 line comments and `/* */` block comments. The `#116` `validate_test_sql` used
 for drafted `custom_sql` rejects both wholesale — which would mass-degrade
 real ingested bodies to `kept-without-evidence`. The ingested path instead
@@ -266,7 +352,9 @@ comment-bearing but otherwise-clean body passes. The determinism check that
 already ran at ingest is kept as a belt-and-braces `kept-without-evidence`
 fallback in the compiler (the total-compilation choke point).
 
-**Count-of-rows scalar restructure (#267).** A manifest-ingested body that is
+#### Count-of-rows scalar restructure (#267)
+
+A manifest-ingested body that is
 a bare count-of-rows scalar — `SELECT count(*) …`, `count(col)`, or
 `count(DISTINCT …)` — is **not** row-returning, so wrapping it directly in the
 adapter's `SELECT COUNT(*) AS failures FROM (<sql>)` envelope would report
@@ -286,16 +374,18 @@ verdict, which scores a raw `count(*)` body as always-failing — see
 [`docs/ingest-ops.md` § count-of-rows](ingest-ops.md#count-of-rows-scalar-bodies-are-pruned-267)
 for the full soundness note and the non-empty-smoke-test caveat.
 The restructure is a pure-string wrap (no sqlglot in the compiler); the
-composed SQL is re-run through `validate_ingested_sql`. Because the ingested
-body is a `from_manifest` `custom_sql`, `_test_requires_source_table` already
-routes it to the **source table** under every sample strategy — the same
-source-routing described under *Full-scope, always* above, with no new engine
-arm. **Belt-and-braces:** a scalar body that reaches the compiler but isn't a
+composed SQL is re-run through `validate_ingested_sql`. A count-of-rows scalar
+is an **aggregate**, so `_test_requires_source_table` keeps routing it to the
+**source table** under every sample strategy — it is explicitly excluded from
+#268's relation-rewriting (a `COUNT(*)` over a hash-mod'd sample returns the
+sample size, not the real count). **Belt-and-braces:** a scalar body that
+reaches the compiler but isn't a
 restructurable count (one that slipped the ingest gate) returns
 `_InvalidIdentifier` → `kept-without-evidence` rather than the always-`1` wrap;
 the 5-value `DropReason` is unchanged.
 
-**KEY FINDING — dbt-expectations bodies are row-returning, so they prune.**
+#### KEY FINDING — dbt-expectations bodies are row-returning, so they prune
+
 `dbt-expectations` compiles *every* macro — including
 `expect_table_row_count_to_be_between` — into a row-returning
 `validation_errors` shell whose `count(*)` sits inside a nested CTE, so the
@@ -752,28 +842,48 @@ a single `os.write` (DEC-016). The third instance of the convention
 across the codebase — mirrors `signalforge.safety.audit` (DEC-011 of
 safety) and `signalforge.draft.audit` (DEC-006/008/013 of llm-drafter).
 
-`PruneEvent` fields (~19 total):
+`PruneEvent` fields:
 
 | Field                  | Type                                | Meaning                                                                                          |
 | ---------------------- | ----------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `audit_schema_version` | integer (`Literal[2]`)              | Audit shape version. Currently `2` (bumped 1→2 by issue #55 when `config_hash` migrated to `blake2b-8`). Bump only on shape change; `extra="ignore"` handles additions. |
+| `audit_schema_version` | integer                             | Audit shape version. Currently **`4`** (1→2 by #55 when `config_hash` migrated to `blake2b-8`; 2→3 by #171 when `as_of` + `stats` landed; 3→4 by #268 when `bypassed_to_source` landed). The field is a plain `int`, not a `Literal`, so older records still round-trip — audit replay across versions is a real requirement. Bump only on shape change; `extra="ignore"` handles additions. |
 | `signalforge_version`  | PEP-440 version string              | Package version that produced the record.                                                        |
 | `record_id`            | 32-hex-char string                  | Fresh `uuid4().hex` per record; gives reviewers a stable handle for a single decision.           |
 | `timestamp`            | ISO-8601 UTC, microsecond, `Z`      | When the decision was finalised.                                                                 |
 | `config_hash`          | 16 hex chars                        | `blake2b(canonical_config_json, digest_size=8)`. Migrated from `SHA-256[:16]` by issue #55 so the audit corpus reads one hash recipe across every writer. Mirrors safety's `policy_hash` (DEC-005). |
 | `model_unique_id`      | string                              | dbt `unique_id` of the pruned model.                                                             |
-| `test`                 | discriminated-union object          | The original `CandidateTest` from the drafter (typed; not a loose dict — DEC-004).               |
+| `test`                 | discriminated-union object          | The original `CandidateTest` from the drafter (typed; not a loose dict — DEC-004). A `custom_sql` test's `sql` body is truncated on the audit copy when over-cap — see the note below the table. |
 | `test_anchor`          | string                              | `"column.<name>"` for column-scoped tests; literal `"model"` for model-level tests.              |
 | `decision`             | `"kept"` \| `"dropped"`             | Top-level verdict.                                                                               |
 | `reason`               | `DropReason` literal                | One of the five reasons in [Drop-reason taxonomy](#drop-reason-taxonomy).                        |
 | `failures`             | integer                             | Failing-row count from the warehouse. `0` for `always-passes` and `requires-future-data`.        |
-| `sampled_rows`         | integer or `null`                   | Sample size the test ran against. `null` for full-scope or no-warehouse-call decisions.          |
-| `scope`                | `"sample"` \| `"full"`              | Mirrors `PruneConfig.scope`.                                                                     |
+| `sampled_rows`         | integer or `null`                   | Sample size the test ran against. `null` for full-scope or no-warehouse-call decisions — **including a test that bypassed the sample under `scope="sample"`**; read `bypassed_to_source` to tell the two apart. |
+| `scope`                | `"sample"` \| `"full"`              | Mirrors `PruneConfig.scope` — the scope the operator **requested**, not necessarily the one this test ran at (see `bypassed_to_source`). |
 | `elapsed_ms`           | integer                             | Per-test wall-clock cost. `0` for budget-exhausted (test never ran).                             |
-| `compiled_sql_hash`    | 16 hex chars                        | `blake2b(sql.encode(), digest_size=8).hexdigest()`. Stable empty-string hash for no-SQL outcomes. |
-| `compiled_sql`         | string                              | The exact SELECT issued to the warehouse. Empty for `requires-future-data` and budget-exhausted. |
+| `compiled_sql_hash`    | 16 hex chars                        | `blake2b(sql.encode(), digest_size=8).hexdigest()` over the **full** compiled SQL — computed before any audit truncation, so it stays the forensic anchor. Stable empty-string hash for no-SQL outcomes. |
+| `compiled_sql`         | string                              | The exact SELECT issued to the warehouse, truncated when over-cap (see below). Empty for `requires-future-data` and budget-exhausted. |
 | `why`                  | string                              | One-line human-readable rationale. Architectural Commitment #5.                                  |
 | `sample_failures`      | array of object or `null`           | Up to `capture_failure_rows` failing rows. `null` when capture is disabled or no failures.       |
+| `bypassed_to_source`   | boolean                             | **New in schema v4 (#268).** `true` when the test was routed *past* the sample to the source production table: a metadata-aggregate variant under a sample scope (`row_count_between` / `unique_combination` / `row_count_anomaly_by_period`), or a manifest-ingested `custom_sql` whose body could not be safely rewritten onto the sample relation. `false` under `scope="full"` (there is no sample to bypass), for tests that genuinely ran against the sample, and for decisions taken with **no** routing at all (prune disabled, budget exhausted, or the blanket materialisation-failure degrade where a drafted row-level test forced every candidate to `kept-without-evidence` without compiling). Note the DEC-009 materialisation-failure **fallback** path is `true`, not `false`: when nothing in the batch needed the sample, the candidates re-route to and run against the source, so they *were* routed past the (attempted) sample. Since `scope` is copied verbatim from the config, this is the only field that tells a reviewer whether the verdict came from the sample or from a full scan of the source. |
+| `as_of`                | ISO date or `null`                  | Evaluation date for time-bound decisions (`row_count_anomaly_by_period`; #171). `null` otherwise. |
+| `stats`                | object or `null`                    | Method-tagged `AnomalyTestStats` from the anomaly stats query (#171). `null` otherwise.          |
+
+**SQL truncation on the audit record (#268).** A `PruneEvent` serialises a
+`custom_sql` body **twice** — once as `test.sql` and once as `compiled_sql`. A
+real dbt-expectations `compiled_code` is routinely 1–2 KB, so an untruncated
+record blew the 4000-byte per-line cap and raised
+`PruneAuditRecordTooLargeError`, aborting the run mid-batch. The cap itself is
+load-bearing (`PIPE_BUF` atomic concurrent appends) and is not raised; instead
+**both** SQL surfaces are bounded to a 1200 JSON-escaped-byte prefix with a
+**visible** truncation marker (`-- [signalforge: SQL truncated for the audit
+record …]`). The metric is JSON-escaped bytes, not raw characters: the writer
+serialises with `ensure_ascii=True`, so a multibyte character can escape to up
+to 12 bytes on the line — a raw-character budget would under-count and a crafted
+multibyte body could still overflow the cap.
+`compiled_sql_hash` is computed over the full SQL, so the forensic chain
+survives, and the in-memory `PruneDecision` handed to the diff / grade stages is
+**not** truncated. Under-cap bodies (every drafted built-in) are byte-identical
+to pre-#268.
 
 **Fail-closed semantics.** `OSError` / `PermissionError` / encoding
 failures from `os.write` / `os.fsync` propagate raw; the orchestrator
@@ -816,13 +926,24 @@ post-mortem cost attribution; see
 [`docs/warehouse-adapter-ops.md` § Session cleanup & manual recovery](warehouse-adapter-ops.md#session-cleanup--manual-recovery)
 for the query template.
 
+Since #268, `compiled_sql` alone is no longer sufficient to tell whether a given
+test in a materialised run actually *read* the sample: a metadata-aggregate
+variant or a non-rewritable manifest-ingested body is dispatched against the
+**source** even inside a materialised run. `bypassed_to_source` (schema v4) is
+the field that says so directly — filter on it before drawing cost or coverage
+conclusions from a mixed run.
+
 A `kept-without-evidence` decision whose `why` field starts with
 `"sample materialisation failed: "` is the conservative-bias signal
 that materialisation raised at orchestrator entry — every candidate
 in the run shares the same `why` shape, and the operator should
 inspect the orchestrator-level WARNING (see
 [`docs/cli-ops.md` § Stderr shapes](cli-ops.md#stderr-shapes-warning))
-for the materialisation error class and message.
+for the materialisation error class and message. **Since #268 that blanket
+degrade only fires when a *drafted* row-level test is in the batch:** if every
+candidate could have run against the source anyway, the engine falls back to
+full scope against the source and returns real verdicts, logging one WARNING
+carrying `"fallback": "source"` instead.
 
 ## Audit log sensitivity
 

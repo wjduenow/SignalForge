@@ -68,12 +68,21 @@ Import from `signalforge.ingest`.
   reads the operator's **singular** dbt tests (`tests/*.sql`) for one
   model into `custom_sql` candidates (issue #116; see
   [Singular `tests/*.sql` tests](#singular-testssql-tests)).
-- **`read_manifest_tests(manifest, model, *, project_dir=None) -> IngestResult`** —
+- **`read_manifest_tests(manifest, model, *, project_dir=None, dialect="bigquery") -> IngestResult`** —
   bridges the model's **dbt-compiled `manifest.json` test nodes**
   (`dbt-expectations`, `dbt-utils`, in-house generic tests) into
   `custom_sql` candidates by reading each node's already-Jinja-resolved
   `compiled_code` (issue #154; see
   [Recognition of dbt-compiled manifest tests](#recognition-of-dbt-compiled-manifest-tests)).
+  `dialect` is the sqlglot dialect the gates below parse `compiled_code` under;
+  pass the active warehouse dialect (`adapter.dialect().name`) when you have one
+  so the ingest gates and the prune compiler agree on a body (#268). A
+  disagreement cannot produce a wrong verdict — not because the gates are
+  strictly more conservative (they are *permissive* on a parse failure, so a
+  mismatch could admit a body rather than skip-record it), but because the
+  downstream prune compilation stays **fail-closed**: a body the compiler
+  cannot safely rewrite/validate under the real dialect routes to
+  `kept-without-evidence`. The disagreement can cost signal, never correctness.
 
 The `schema` argument is overloaded **by type** — this str-vs-`Path` split
 is the contract:
@@ -393,8 +402,8 @@ under #154.
 
 ## Recognition of dbt-compiled manifest tests
 
-`read_manifest_tests(manifest, model, *, project_dir=None) -> IngestResult`
-(issue #154) prunes the tests you already author with `dbt-expectations`,
+`read_manifest_tests(manifest, model, *, project_dir=None, dialect="bigquery") -> IngestResult`
+(issue #154; `dialect` added in #268) prunes the tests you already author with `dbt-expectations`,
 `dbt-utils`, or your own in-house generic macros — **without** teaching
 SignalForge each macro's semantics. It leans on work dbt already did: after
 `dbt compile`, every `resource_type == "test"` node in `manifest.json`
@@ -416,19 +425,20 @@ accepted for signature parity with the adjacent stages but is unused (this
 bridge does no path I/O — the raw `compiled_code` is carried verbatim; SQL
 safety is re-validated in the prune compiler).
 
-### Four gates decide prunable vs. skip-recorded
+### Five gates decide prunable vs. skip-recorded
 
-For each associated node, the bridge runs four checks in order —
-**presence → row-returning → deterministic → comment-tolerant safety scan** —
-and the first failure wins. Only a body that clears every gate becomes a
+For each associated node, the bridge runs five checks in order —
+**presence → size cap → row-returning → deterministic → comment-tolerant safety
+scan** — and the first failure wins. Only a body that clears every gate becomes a
 model-level `CandidateTestCustomSQL(column=None, sql=<compiled_code>)`.
 A node that fails a gate is **skip-recorded, never silently dropped**, using
 the same closed 3-value `SkipReason` (never grown):
 
 | Disposition | `SkipReason` | Trigger |
 |---|---|---|
-| **Pruned** (`custom_sql` candidate) | — | `compiled_code` present, row-returning (or a count-of-rows scalar — see below), deterministic, passes the safety scan |
+| **Pruned** (`custom_sql` candidate) | — | `compiled_code` present, under the size cap, row-returning (or a count-of-rows scalar — see below), deterministic, passes the safety scan |
 | Absent / null `compiled_code` | `custom-or-generic-test` | `dbt parse` (not `dbt compile`) produced the manifest; the node has no body to evaluate. `detail` names the fix: run `dbt compile`. |
+| `compiled_code` over the **256 KiB** cap | `malformed-supported-test` | The body is **not parsed at all** (#268). `read_manifest_tests` takes an already-parsed `Manifest`, so the 5 MB file-read cap that guards `read_schema` never applied here and a pathological body reached sqlglot unbounded. 256 KiB sits far above any realistic dbt-expectations / dbt-utils compiled body. `detail` names the fix: narrow or drop the test. |
 | Non-count aggregate / scalar-shaped body | `malformed-supported-test` | the outer `SELECT` is a single collapsing **non-count** aggregate (`AVG` / `SUM` / `MIN` / `MAX`), a multi-aggregate projection, or arithmetic on a count (`COUNT(*) + 1`) with no `GROUP BY` — no dbt "returned rows = failures" convention recovers a failing-rows form, so wrapping it in `SELECT COUNT(*) AS failures FROM (<sql>)` would report `failures=1` **always** (a silent wrong `kept`). A **count-of-rows** scalar is the exception and IS pruned (#267 — see below). |
 | Non-deterministic body | `malformed-supported-test` | `TABLESAMPLE` / `RAND` / `CURRENT_TIMESTAMP` / `NOW` / `GETDATE` / `UUID` / … — the prune verdict would not be reproducible (violates explainable-diffs). |
 | `compiled_code` fails the safety scan | `malformed-supported-test` | a top-level `;` (multiple statements) or unbalanced parentheses survive the comment-tolerant scan (see below). |
@@ -440,7 +450,24 @@ checked against AST *function nodes* only. Both gates are conservative —
 on a sqlglot parse failure they return the *permissive* verdict (treat as
 row-returning / deterministic), leaving a genuinely broken body to be caught
 by the safety scan or the warehouse adapter's `kept-without-evidence`
-routing downstream.
+routing downstream. "Parse failure" is now **total** over hostile input (#268):
+a `RecursionError` from a deeply-nested body and a `ValueError` from an unknown
+dialect are caught alongside sqlglot's own errors. Before #268 either escaped
+the gates and **aborted the whole prune run with no audit rows written**.
+
+### Ingested tests can be sampled (#268)
+
+A manifest-ingested body is no longer pinned to a full scan of the source. Under
+`prune.scope: sample` + `prune.sample_strategy: materialised`, the prune engine
+rewrites the model's own relation in the compiled body onto the materialised
+sample table via sqlglot AST analysis — provided the body clears a further set of
+gates (row-returning, exactly one physical relation and it is the model's own, no
+CTE-alias collision, a verified post-condition on the rewritten AST, and at least
+two samplable ingested bodies in the batch to pay for the CTAS). Anything else
+keeps running full-scope against the source, as it did under #154. `oneshot` is
+not supported and still routes to source. The gates, the cost model and the
+observability are documented in
+[`docs/prune-ops.md` § Sampling an ingested body](prune-ops.md#sampling-an-ingested-body-relation-rewriting-and-the-gates-it-must-clear-268).
 
 ### KEY FINDING — dbt-expectations bodies are almost all prunable
 
@@ -563,6 +590,13 @@ Two attack surfaces, both mitigated before any parse:
   the **raw byte length is size-capped before the parse runs** (5 MB) so a
   billion-laughs / deeply-nested-anchor payload never reaches the parser.
   Oversize raises `IngestSchemaTooLargeError`.
+- **Pathological compiled SQL.** A manifest test node's `compiled_code` is
+  size-capped at **256 KiB before any sqlglot parse** (#268) — the YAML cap above
+  guards *file* reads only, and `read_manifest_tests` is handed an already-parsed
+  `Manifest`. An over-cap body is skip-recorded (`malformed-supported-test`),
+  never a hard abort. A body that is under-cap but still hostile (deep nesting)
+  can no longer escape the sqlglot gates: `RecursionError` and `ValueError` are
+  caught alongside sqlglot's own errors and return the conservative verdict.
 - **Path traversal / symlinks.** A `Path` argument is canonicalised through
   the project's symlink-/containment-hardened path safety helper before any
   read.

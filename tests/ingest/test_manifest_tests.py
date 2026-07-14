@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import signalforge.ingest.reader as reader_module
 from signalforge.draft.models import CandidateTestCustomSQL
 from signalforge.ingest import read_manifest_tests
 from signalforge.ingest.models import SkippedTest, SkipReason
@@ -547,3 +548,169 @@ def test_bridge_routes_scalar_count_singular_test() -> None:
     # form at prune-compile time, downstream of this bridge).
     assert "count(*)" in candidate.sql.lower()
     assert '"orders"' in candidate.sql
+
+
+# ---------------------------------------------------------------------------
+# #268 US-001 — compiled_code size cap + dialect threading
+# ---------------------------------------------------------------------------
+
+
+def test_oversize_compiled_code_is_skip_recorded_with_an_existing_skip_reason(
+    monkeypatch: Any,
+) -> None:
+    """A ``compiled_code`` body over the cap is skip-recorded, never parsed.
+
+    ``read_manifest_tests`` takes an already-parsed ``Manifest``, so the 5 MB
+    file-read cap never applies to it — a pathological body would reach sqlglot
+    unbounded (#268 DEC-012(2)). The cap must fire BEFORE any gate call, and the
+    skip must reuse the closed 3-value ``SkipReason`` (no 4th value).
+    """
+    calls: list[str] = []
+    for gate in ("is_row_returning", "is_prunable_count_scalar", "is_deterministic_sql"):
+
+        def _spy(sql: str, *, dialect: str = "bigquery", _name: str = gate) -> bool:
+            calls.append(_name)
+            raise AssertionError(f"{_name} must not be reached for an over-cap body")
+
+        monkeypatch.setattr(reader_module, gate, _spy)
+
+    body = "select * from t where x = '" + "a" * reader_module._COMPILED_CODE_SIZE_LIMIT_BYTES + "'"
+    manifest = _manifest_with(
+        _generic_test(unique_id="test.shop.huge", compiled_code=body, column_name="amount")
+    )
+
+    result = read_manifest_tests(manifest, _make_model())
+
+    assert calls == []
+    assert result.candidate.tests == ()
+    assert len(result.skipped) == 1
+    skip = result.skipped[0]
+    assert skip.reason in _VALID_SKIP_REASONS
+    assert skip.reason == "malformed-supported-test"
+    assert "compiled_code" in skip.detail
+
+
+def test_compiled_code_size_cap_constant_is_256_kib() -> None:
+    """Pin the cap VALUE, not just the check's existence (#268 QG).
+
+    The over-cap test derives its body from the live constant, so it stays
+    green if the cap is silently RAISED — but raising it re-opens the
+    unbounded-sqlglot-parse defence this cap exists to close (a 300 KB body
+    would reach the parser). Mirrors the file-cap value pin
+    (``test_read_test_files_real_cap_constant_is_5mb``).
+    """
+    assert reader_module._COMPILED_CODE_SIZE_LIMIT_BYTES == 262_144
+
+
+def test_lone_surrogate_compiled_code_does_not_crash_the_size_cap() -> None:
+    """#268 QG — a lone surrogate from a manifest JSON escape (`\\ud800`) must not
+    crash the size-cap encode.
+
+    ``"\\ud800".encode("utf-8")`` raises ``UnicodeEncodeError`` (NOT a
+    `_PARSE_FAILURES` type), which would escape this stage-0 reader and abort the
+    whole prune run — the class of bug US-001 closed for the sqlglot gates. The
+    size-cap step catches that ``UnicodeEncodeError`` and skip-records the body
+    immediately (``reason="malformed-supported-test"``). It deliberately does NOT
+    encode through with ``surrogatepass`` and defer to a downstream gate: a
+    surrogate body IS a valid row-returning candidate to sqlglot, so it would
+    resurface and crash ``compiled_sql_hash`` at prune time. A body SignalForge
+    cannot UTF-8 encode cannot be safely hashed / audited / run, so it is refused
+    here, never a crash.
+    """
+    body = "select c from t where c = '\ud800'"  # a lone surrogate in a literal
+    manifest = _manifest_with(
+        _generic_test(unique_id="test.shop.surrogate", compiled_code=body, column_name="amount")
+    )
+
+    # No UnicodeEncodeError escapes; the body is skip-recorded at the size-cap
+    # step (the closed 3-value SkipReason is not grown), not crashed on.
+    result = read_manifest_tests(manifest, _make_model())
+    assert result.candidate.tests == ()
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason == "malformed-supported-test"
+    assert result.skipped[0].reason in _VALID_SKIP_REASONS
+
+
+def test_under_cap_compiled_code_still_becomes_a_candidate() -> None:
+    """The cap must not swallow a realistic dbt-expectations body (negative pin)."""
+    body = "select * from t where x = '" + "a" * 1_000 + "'"
+    manifest = _manifest_with(
+        _generic_test(unique_id="test.shop.ok", compiled_code=body, column_name="amount")
+    )
+
+    result = read_manifest_tests(manifest, _make_model())
+
+    assert result.skipped == ()
+    assert len(result.candidate.tests) == 1
+
+
+def test_read_manifest_tests_threads_the_callers_dialect_into_every_gate(
+    monkeypatch: Any,
+) -> None:
+    """Every sqlglot gate call must carry the caller's dialect, not the default.
+
+    Pre-#268 the bridge called the gates with the ``"bigquery"`` default while
+    the prune compiler passes ``dialect.name`` — two parses of the same body
+    under different dialects can disagree, so the engine and the compiler could
+    reach opposite verdicts (#268 DEC-013).
+    """
+    seen: dict[str, list[str]] = {}
+
+    def _make_spy(name: str, verdict: bool):
+        def _spy(sql: str, *, dialect: str = "bigquery") -> bool:
+            seen.setdefault(name, []).append(dialect)
+            return verdict
+
+        return _spy
+
+    # row-returning False + count-scalar True falls through to the determinism
+    # gate, so all three gates are exercised in one pass.
+    monkeypatch.setattr(reader_module, "is_row_returning", _make_spy("is_row_returning", False))
+    monkeypatch.setattr(
+        reader_module, "is_prunable_count_scalar", _make_spy("is_prunable_count_scalar", True)
+    )
+    monkeypatch.setattr(
+        reader_module, "is_deterministic_sql", _make_spy("is_deterministic_sql", True)
+    )
+
+    manifest = _manifest_with(
+        _generic_test(
+            unique_id="test.shop.dialect",
+            compiled_code="select count(*) from t",
+            column_name="amount",
+        )
+    )
+
+    result = read_manifest_tests(manifest, _make_model(), dialect="snowflake")
+
+    assert result.skipped == ()
+    assert len(result.candidate.tests) == 1
+    assert seen == {
+        "is_row_returning": ["snowflake"],
+        "is_prunable_count_scalar": ["snowflake"],
+        "is_deterministic_sql": ["snowflake"],
+    }
+
+
+def test_read_manifest_tests_dialect_defaults_to_bigquery(monkeypatch: Any) -> None:
+    """The new keyword-only ``dialect`` defaults to ``"bigquery"`` so existing
+    callers keep today's behaviour byte-for-byte."""
+    seen: list[str] = []
+    real = reader_module.is_deterministic_sql
+
+    def _spy(sql: str, *, dialect: str = "bigquery") -> bool:
+        seen.append(dialect)
+        return real(sql, dialect=dialect)
+
+    monkeypatch.setattr(reader_module, "is_deterministic_sql", _spy)
+
+    manifest = _manifest_with(
+        _generic_test(
+            unique_id="test.shop.default",
+            compiled_code="select * from t where amount < 0",
+            column_name="amount",
+        )
+    )
+    read_manifest_tests(manifest, _make_model())
+
+    assert seen == ["bigquery"]

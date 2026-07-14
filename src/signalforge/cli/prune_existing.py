@@ -584,6 +584,23 @@ def _ingest_manifest_tests(
     Returns ``(merged_candidate, manifest_skipped)``. When the model has no
     ingestable manifest test nodes the candidate is returned unchanged so the
     output stays identical to the pre-``--from-manifest`` merge.
+
+    **Dialect (#268 DEC-013).** ``read_manifest_tests`` accepts a keyword-only
+    ``dialect`` so its sqlglot gates parse ``compiled_code`` under the same
+    dialect the prune compiler will. This call site deliberately leaves it at the
+    ``"bigquery"`` default: the warehouse adapter (the only source of a live
+    ``Dialect``) is constructed AFTER this ingest step in ``cmd_prune_existing``
+    (``prune_tests`` owns the ``with adapter:`` block, so the handler builds the
+    adapter late and un-entered). Passing a real dialect here would mean building
+    the adapter earlier purely to read ``dialect().name`` — a plumbing change out
+    of scope for this seam. The default is safe not because the disagreement is
+    harmless in the gates — they are *permissive* on a parse failure
+    (``is_row_returning`` / ``is_deterministic_sql`` return ``True``), so a
+    mismatch could ADMIT a body rather than skip-record it — but because the
+    downstream compile path is **fail-closed**: an ingested body the compiler
+    cannot safely rewrite/validate under the real dialect routes to
+    ``kept-without-evidence`` via ``_InvalidIdentifier`` (or the DEC-007 guard),
+    never a wrong verdict. The disagreement can cost signal, never correctness.
     """
     manifest_result = ingest_module.read_manifest_tests(manifest, model, project_dir=project_dir)
     if not manifest_result.candidate.tests:

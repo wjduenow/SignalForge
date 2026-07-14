@@ -88,10 +88,18 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
   (`Field(default=False, exclude=True)`) distinguishes ingested-from-drafted downstream WITHOUT a
   schema/audit bump (`exclude=True` keeps `candidate_hash` byte-identical — guard that invariant
   with an explicit test; a mutation dropping it passed the whole suite at QG time).
-- **Four-gate classification, all reusing `signalforge.ingest._compiled_sql` (sqlglot-AST):**
+- **Five-gate classification, all reusing `signalforge.ingest._compiled_sql` (sqlglot-AST):**
+  **size cap** (`len(compiled_code.encode()) <= _COMPILED_CODE_SIZE_LIMIT_BYTES`, currently 256 KiB,
+  checked BEFORE any parse; #268 — there is NO other cap on the manifest path, and an unbounded body would
+  reach sqlglot; over-cap → skip-record via the existing `malformed-supported-test` reason) →
   presence (`compiled_code` non-null) → `is_row_returning` (skip bare-scalar `SELECT COUNT(*)`;
   DEC-004) → `is_deterministic_sql` (skip `TABLESAMPLE`/`RAND`/`CURRENT_TIMESTAMP`/…; DEC-012) →
-  `validate_ingested_sql` (comment-tolerant safety scan; DEC-013). **Regex/substring is unsafe
+  `validate_ingested_sql` (comment-tolerant safety scan; DEC-013). **The three AST helpers are TOTAL
+  over hostile input (#268):** each catches `RecursionError` + `ValueError` alongside
+  `sqlglot.errors.SqlglotError` (a ~2000-deep nested-paren body raises `RecursionError` — NOT a
+  `SqlglotError` — and a bad `dialect=` raises `ValueError`; either escaping aborted the WHOLE prune
+  run with no audit rows). `read_manifest_tests` threads the active `dialect=` into every gate (was
+  hardcoded `"bigquery"`, which could disagree with the compiler's `dialect.name`). **Regex/substring is unsafe
   here — a column named `random_id` false-positives; use AST.** NOTE: dbt-expectations wraps
   EVERY macro (incl. `expect_table_row_count_to_be_between`) in a row-returning `validation_errors`
   shell, so those ARE prunable. **Post-#267 the row-returning gate no longer skip-records a bare
@@ -113,3 +121,17 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
 - **Stage-0 preserved.** No logging, no warehouse/LLM calls, no SQL building, no `bigquery` import.
   The `_compiled_sql` helpers are self-contained (they do NOT import the warehouse `_strip_string_literals`
   private — a QG fix; a stage-0 reader must not couple to another layer's `_`-internal).
+- **Relation-locate helpers for `scope=sample` (#268) — ANALYSIS only, no SQL emitted.**
+  `plan_relation_rewrite(sql, *, relation, dialect) -> RewritePlan` parses `compiled_code`, resolves scopes
+  via `sqlglot.optimizer.scope`, `normalize_identifiers`-folds both sides, **exact-full-tuple**-matches the
+  model's own relation (never suffix — a bare `orders` would false-positive), enforces a **single physical
+  relation** on the AST (a JOIN/comma-join/correlated-subquery/`NOT EXISTS` is refused — the compiler's
+  `_JOIN_RE` regex misses those), refuses a **CTE-alias collision** (a dotted alias
+  `` `proj.ds.tbl` `` normalises to a Table tuple matching the relation), and returns **character spans**
+  (`Token.start`/`.end`, inclusive end) for the compiler to splice. It always returns a frozen `RewritePlan`
+  (never `None`) so a machine-readable reject `reason` (∈ `RELATION_REWRITE_REASONS`) can ride along for the
+  DEC-014 histogram. `verify_relation_rewrite(rewritten_sql, *, source, temp, expected_n, dialect) -> bool`
+  is the integrity **post-condition** (parses clean, ZERO residual source tables, exactly N temp tables) —
+  **a count is not a proof.** These keep sqlglot in ingest (locate) and out of `prune/` (splice); the
+  compiler stays a consumer, so the 2-importer confinement holds. Full contract:
+  `prune-engine.md` § "Sampled manifest-ingested tests (#268)".

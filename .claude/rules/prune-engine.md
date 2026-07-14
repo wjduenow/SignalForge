@@ -217,6 +217,7 @@ Issue #171 introduced `_test_requires_source_table(test: CandidateTest, sample_s
 
 - `1 → 2` (issue #55): `config_hash` recipe migrated from `SHA-256[:16]` to `blake2b-8`.
 - `2 → 3` (issue #171, DEC-013): added `as_of: date | None = None` + `stats: AnomalyTestStats | None = None` fields. `audit_schema_version: int` (not `Literal`) preserves v2 replay; `@field_serializer("as_of")` returns `.isoformat()` (no precedent for `date` in `_common.timestamp` — that helper is `datetime`-only per issue #56).
+- `3 → 4` (issue #268, DEC-011): added `bypassed_to_source: bool = False` on `PruneDecision` + `PruneEvent`. `PruneDecision.scope` is copied from `config.scope`, so a *bypassed* ingested test was already recorded as `scope="sample"` while it full-scanned the source — indistinguishable from a genuinely-sampled one post-#268. The field is set from the SAME `_test_requires_source_table(...)` call that computes `per_test_table_ref`, so audit flag and routing cannot drift. Also fixes the same latent lie for `row_count_between` / `unique_combination` / `row_count_anomaly_by_period` (bypass to source under any sample scope). Field defaults `False` so v3 records still replay (typed `int`, not `Literal`).
 
 ### `WarehouseAdapter.run_stats_query` graceful degrade (issue #171)
 
@@ -224,23 +225,27 @@ New ABC method on `WarehouseAdapter`: `run_stats_query(sql: str) -> tuple[dict[s
 
 ## Reference
 
-`plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — v0.2 materialised-sample additions. `plans/super/35-prune-enabled-doc-reframe.md` — operator-disable additions. `plans/super/51-kept-rate-warn-doc.md` — kept-rate WARNING + drop-rate doc. `plans/super/55-normalise-hash-recipe.md` — hash recipe normalisation. `plans/super/121-prune-snowflake-dialect.md` — Snowflake compiler dialect (DEC-001…008). `plans/super/171-row-count-anomaly.md` — `_test_requires_source_table` helper (DEC-009), DEC-010 stricter-bypass behavior change, two-query split + cold-start (DEC-008), `AnomalyTestStats` (DEC-005), `--as-of` reproducibility carve-out (DEC-001), `_PRUNE_AUDIT_SCHEMA_VERSION: 2 → 3` + serializer (DEC-013), `StatsQueryNotSupportedError` ABC graceful degrade. `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/prune/test_compiler_import_guard.py` — `prune/` SDK-import confinement (DEC-008 of #121). `tests/prune/test_compiler_fakesnow.py` — gated `@pytest.mark.snowflake` fakesnow/sqlglot validation. `tests/test_audit_completeness.py` — AST-scan suite. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture (v3 as of #171).
+`plans/super/6-prune-engine.md` — DEC-001 … DEC-028. `plans/super/22-temp-table-sample.md` — v0.2 materialised-sample additions. `plans/super/35-prune-enabled-doc-reframe.md` — operator-disable additions. `plans/super/51-kept-rate-warn-doc.md` — kept-rate WARNING + drop-rate doc. `plans/super/55-normalise-hash-recipe.md` — hash recipe normalisation. `plans/super/121-prune-snowflake-dialect.md` — Snowflake compiler dialect (DEC-001…008). `plans/super/171-row-count-anomaly.md` — `_test_requires_source_table` helper (DEC-009), DEC-010 stricter-bypass behavior change, two-query split + cold-start (DEC-008), `AnomalyTestStats` (DEC-005), `--as-of` reproducibility carve-out (DEC-001), `_PRUNE_AUDIT_SCHEMA_VERSION: 2 → 3` + serializer (DEC-013), `StatsQueryNotSupportedError` ABC graceful degrade. `src/signalforge/prune/` — current implementation. `docs/prune-ops.md` — operational reference. `tests/prune/test_drift_detector.py` — schema-drift gate. `tests/prune/test_compiler_import_guard.py` — `prune/` SDK-import confinement (DEC-008 of #121). `tests/prune/test_compiler_fakesnow.py` — gated `@pytest.mark.snowflake` fakesnow/sqlglot validation. `tests/test_audit_completeness.py` — AST-scan suite. `tests/llm/test_logger_grep_gate.py` — lazy-format logger gate. `tests/fixtures/prune/prune_event_v1.jsonl` — committed audit fixture (v4 as of #268). `plans/super/268-ingest-sample-scope.md` — DEC-001 … DEC-016 (sampled ingested tests: locate-in-ingest/splice-in-compiler, `verify_relation_rewrite` AST post-condition, `_IngestedSamplePlan` precompute, DEC-009 materialisation fallback, `bypassed_to_source` + audit v3→4, JSON-escaped SQL truncation, gated BigQuery live cert). `tests/prune/test_ingested_rewrite_parse_guard.py` — ungated sqlglot parse-guard over rewritten-SQL fixtures. `tests/cli/test_e2e_bigquery_ingested_sample.py` — the gated BigQuery merge gate.
 
-## Ingested manifest-compiled tests: full-scope routing + determinism fallback (issue #154)
+## Ingested manifest-compiled tests: routing + determinism fallback (issue #154, sampling in #268)
 
 Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-layer.md`
 § `read_manifest_tests`) route differently from drafted `custom_sql`:
 
-- **`scope=full` regardless of `--scope` (DEC-007).** dbt's `compiled_code` renders the model
-  relation with dbt's own dialect-specific quoting, which the `custom_sql` string-substitution
-  CANNOT match — under `scope=sample` every ingested test would silently degrade to
-  `kept-without-evidence` (the fail-closed guard holds — NOT a prod full-scan — but sampling is
-  inert). So `_test_requires_source_table` returns `True` for `from_manifest` custom_sql under any
-  sample strategy (joins the metadata-aggregate bypass set → `source_table_ref`, both the
-  `all_bypass_to_source` short-circuit AND the per-test `per_test_table_ref` arm, in lockstep — the
-  #170 two-conditional rule). One INFO fires when `--scope=sample` was requested. The compiler's
-  ingested branch returns the compiled body VERBATIM (dbt's quoted relation already points at the
-  real table — no substitution). sqlglot AST relation-rewriting for true sampling is deferred (#268).
+- **Sampled when it can be, source-full-scope otherwise (#154 DEC-007, superseded by #268).** #154
+  shipped ingested tests as `scope=full` only — dbt's `compiled_code` renders the model relation with
+  dbt's own dialect-specific quoting, which the `custom_sql` string-substitution CANNOT match, so
+  `_test_requires_source_table` returned `True` for every `from_manifest` candidate. **#268 replaced the
+  string substitution with sqlglot AST relation-rewriting** (see the § below), so a `from_manifest`
+  candidate is now sampled when ALL of: `sample_strategy=materialised` + `scope=sample`; row-returning
+  (a #267 count-of-rows scalar is an aggregate → stays at source); exactly ONE physical relation and it
+  is the model's own; no CTE-alias collision; the spliced SQL passes the `verify_relation_rewrite`
+  post-condition; **and ≥2 such candidates in the batch** (DEC-010 — the `SELECT *` CTAS can't pay for a
+  single narrow test). Anything failing a gate keeps bypassing to source at full scope (today's
+  behaviour); `oneshot` always bypasses. The compiler's ingested branch returns the body VERBATIM only
+  when routed to source; when routed to the temp it splices via the verified `ingested_sql_override` and
+  **fails closed** (`_InvalidIdentifier`) if handed a temp `table_ref` with no verified override — the
+  guard that prevents a silent prod full-scan booked as an evidence-backed `scope="sample"` verdict.
 - **Comment-tolerant validation on the compiled body (DEC-013).** The ingested compile path uses
   `validate_ingested_sql` (strips `--`//`* */` before the safety scan) NOT the #116 `validate_test_sql`
   — dbt-compiled SQL routinely carries comments the #116 validator rejects wholesale. Plus a
@@ -261,3 +266,51 @@ Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-lay
 - **sqlglot extension.** The compiler consumes `signalforge.ingest._compiled_sql` (the 3rd sqlglot
   consumer after `draft/parser` and `ingest/_compiled_sql` itself); the `test_compiler_import_guard`
   (no `google.cloud`/`snowflake` under `prune/`) is unaffected — sqlglot is dialect-neutral parsing.
+
+## Sampled manifest-ingested tests (#268)
+
+`scope=sample` for `from_manifest` `custom_sql` — the relation in dbt's foreign-rendered `compiled_code`
+is rewritten to the `_SESSION._sf_sample_*` temp. The load-bearing patterns, all reusable:
+
+- **Locate in ingest, splice in the compiler (DEC-001).** `ingest/_compiled_sql.plan_relation_rewrite`
+  parses + returns character spans + a reject `reason`; `prune/compiler._build_ingested_rewrite` does a
+  pure back-to-front string splice over those spans (inclusive-end `Token` offsets, sliced against the
+  IDENTICAL `str` that was tokenized). No `import sqlglot` under `prune/` — still 2 importers, no
+  confinement scan owed (`llm-drafter.md` § sqlglot confinement).
+- **A count is NOT an integrity proof (DEC-004).** `ast_match_count == span_count` is defeatable (a
+  column-qualifier span leaves the `FROM` on production; a dotted CTE alias shadows the relation — either
+  silently DELETES a real test). The gate is `verify_relation_rewrite` on the REWRITTEN SQL: parses clean,
+  ZERO residual source-relation tables, exactly N temp tables. Reach for a rewritten-AST post-condition,
+  never a count, whenever you rewrite SQL you did not render.
+- **Precompute once; keep `_test_requires_source_table` PURE (DEC-008).** Samplability needs a parse, but
+  the helper is a documented pure fn called twice per candidate. Build `dict[int, _IngestedSamplePlan]`
+  keyed by INDEX into `pairs` (never `id(test)` — byte-identical candidates are legal) BEFORE routing;
+  give the helper a pure `samplable: bool = False` kwarg. Both routing sites (`all_bypass_to_source` +
+  `per_test_table_ref`) read the same plan (#170 two-conditional). The splice/verify runs in
+  `_finalise_ingested_plans` AFTER `materialise_sample` (the temp `TableRef` can't exist before); a
+  `verify`-failed rewrite demotes to source, never dispatches unproven.
+- **Materialisation-failure fallback (DEC-009).** On a `WarehouseError` from `materialise_sample`, if
+  nothing in the batch genuinely NEEDS the sample (every candidate is bypass-to-source or
+  samplable-ingested), re-route to source at full scope and CONTINUE (real verdicts) — the WARNING gains
+  a `"fallback": "source"` key. Only the blanket `kept-without-evidence` when a drafted row-level test is
+  present. Closes a regression: a >100M-row unpartitioned model raises `SamplingRequiresPartitionFilterError`
+  BEFORE the CTAS, which would otherwise degrade every candidate to zero pruning.
+- **Observability (DEC-014).** The #154 "evaluating full-scope against source" INFO is GONE (a lie for the
+  samplable subset). One aggregate INFO per call carries a `{reason: count}` histogram over
+  `RELATION_REWRITE_REASONS ∪ _INGESTED_REJECT_REASONS`, built OUTSIDE the `json.dumps` call (the grep gate
+  recurses into the dict literal); per-bypassed-candidate breadcrumbs are DEBUG.
+- **Audit SQL truncation (DEC-012(3)).** A `from_manifest` body is serialised TWICE on a `PruneEvent`
+  (`test.sql` + `compiled_sql`), so a real ~1.8 KB dbt-expectations body already blew the 4000-byte
+  `PIPE_BUF` cap → `PruneAuditRecordTooLargeError` → exit 3, run aborted mid-batch. `_build_prune_event`
+  now bounds each SQL field by its **JSON-escaped byte cost** (the writer serialises `ensure_ascii=True`,
+  so a multibyte run escapes to up to 12 bytes/code point — a raw-char or raw-UTF-8-byte budget
+  under-counts by 3× and a crafted emoji body still aborts; QG-caught) with a visible marker;
+  `compiled_sql_hash` (over the FULL sql) keeps the forensic chain, and the in-memory `PruneDecision` stays
+  untruncated. The 4000-byte cap itself is NOT raised.
+- **Latent #154 bugs fixed alongside (DEC-012(1)(2)).** `RecursionError`/`ValueError` now caught in every
+  `_compiled_sql` gate (both escaped `except SqlglotError` and aborted the run); a 256 KiB `compiled_code`
+  size cap added at ingest (the manifest path had none). See `ingest-layer.md` § five-gate classification.
+- **Live-certified (DEC-016).** The gated BigQuery e2e (`tests/cli/test_e2e_bigquery_ingested_sample.py`)
+  is the merge gate — `failures == sample_size` proves the rewritten body bound to the same session as the
+  CTAS. Snapshot/parse-guard certify SHAPE, not that the warehouse ACCEPTS the SQL (the #121/#124/#226
+  lesson). `oneshot` sampling is a follow-up (the CTE approach it would require was prototyped and failed on execution).

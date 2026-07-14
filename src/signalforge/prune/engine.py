@@ -78,6 +78,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -91,6 +92,11 @@ from signalforge.draft.models import (
     CandidateTestRowCountBetween,
     CandidateTestUniqueCombination,
 )
+from signalforge.ingest._compiled_sql import (
+    is_row_returning,
+    plan_relation_rewrite,
+    verify_relation_rewrite,
+)
 from signalforge.manifest.models import Manifest, Model
 from signalforge.prune.audit import (
     _build_prune_event,
@@ -98,6 +104,7 @@ from signalforge.prune.audit import (
     _write_prune_event,
 )
 from signalforge.prune.compiler import (
+    _build_ingested_rewrite,
     _compile_test,
     _compute_compiled_sql_hash,
     _InvalidIdentifier,
@@ -217,6 +224,7 @@ def _decide_anomaly_cold_start(
     elapsed_ms: int,
     scope: Scope,
     as_of: date | None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for an anomaly test whose stats
     query returned fewer than ``min_samples_per_bucket`` periods (#171
@@ -244,6 +252,7 @@ def _decide_anomaly_cold_start(
         compiled_sql=compiled_sql,
         why=_why_kept_without_evidence_cold_start(stats.n_periods, min_required),
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -507,9 +516,303 @@ def _validate_trusted_models(config: PruneConfig, manifest: Manifest) -> None:
             raise PruneTrustedModelNotFoundError(unique_id=unique_id)
 
 
+#: DEC-010 of #268 — the minimum number of samplable manifest-ingested candidates
+#: required before the engine will break the ``all_bypass_to_source``
+#: short-circuit and pay for a ``materialise_sample`` CTAS.
+#:
+#: The CTAS is a ``SELECT *`` (plus the whole-row hash), so it reads EVERY column
+#: of the model, while a narrow ingested test on a wide table is column-pruned by
+#: the warehouse when it runs against the source. The break-even is roughly
+#: ``N × test_column_bytes > table_bytes`` — a single samplable ingested test can
+#: therefore never pay for the CTAS, so a one-test batch keeps bypassing to
+#: source (today's #154 behaviour, byte-unchanged).
+_MIN_SAMPLABLE_INGESTED: int = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _IngestedSamplePlan:
+    """The engine's per-candidate samplability verdict for ONE manifest-ingested
+    ``custom_sql`` body (#268 DEC-008).
+
+    Precomputed ONCE per ``prune_tests`` call, keyed by **index into ``pairs``**
+    — never by ``id(test)``: two byte-identical candidates on different columns
+    are legal, and Python is free to intern / reuse an object's id.
+
+    ``spans`` are the character offsets (inclusive end, per DEC-015) of every
+    reference to the model's own relation in ``test.sql``, as located by
+    :func:`~signalforge.ingest._compiled_sql.plan_relation_rewrite`. They are
+    spliced to the materialised temp table by
+    :func:`~signalforge.prune.compiler._build_ingested_rewrite` and the result is
+    PROVED with :func:`~signalforge.ingest._compiled_sql.verify_relation_rewrite`
+    only once the temp ``TableRef`` exists (i.e. after ``materialise_sample``
+    returns) — see :func:`_finalise_ingested_plans`.
+
+    ``reason`` is ``None`` iff the body is samplable; otherwise it carries the
+    machine-readable refusal (one of :data:`RELATION_REWRITE_REASONS`, or one of
+    the engine-level refusals in :data:`_INGESTED_REJECT_REASONS`) for the
+    DEC-014 histogram US-006 lands.
+    """
+
+    spans: tuple[tuple[int, int], ...]
+    reason: str | None
+
+    @property
+    def samplable(self) -> bool:
+        """``True`` iff this ingested body may be bound to the sampled temp table."""
+        return self.reason is None and bool(self.spans)
+
+
+#: The refusal recorded for an ingested candidate the engine never even planned
+#: because the run's strategy cannot produce a temp table to rewrite the relation
+#: TO (``sample_strategy="oneshot"`` — DEC-002). ``_plan_ingested_samples``
+#: returns an EMPTY plan map in that case, so the DEC-014 histogram synthesises
+#: this reason from the absence of a plan rather than leaving the bypassed
+#: candidates unexplained.
+_INGESTED_REASON_NOT_MATERIALISED: str = "strategy-not-materialised"
+
+#: Engine-level (non-``plan_relation_rewrite``) refusal reasons. Kept as plain
+#: strings — they ride the DEC-014 histogram, never a typed error, and NEVER a
+#: 6th ``DropReason`` (the enum stays the locked 5-value Literal; a refused body
+#: simply keeps its pre-#268 routing to the source table at full scope).
+_INGESTED_REJECT_REASONS: frozenset[str] = frozenset(
+    {
+        "aggregate-scalar",
+        "below-min-samplable",
+        "materialisation-failed",
+        "verify-failed",
+        _INGESTED_REASON_NOT_MATERIALISED,
+    }
+)
+
+
+def _plan_ingested_samples(
+    pairs: list[tuple[str, CandidateTest]],
+    *,
+    model: Model,
+    dialect: Dialect,
+    scope: Scope,
+    sample_strategy: str,
+) -> dict[int, _IngestedSamplePlan]:
+    """Precompute the relation-rewrite plan for every ingested candidate (DEC-008).
+
+    Called ONCE, before the routing block, so the two routing sites (the
+    ``all_bypass_to_source`` short-circuit and the per-test ``per_test_table_ref``
+    override — the #170 two-conditional rule) read the SAME verdicts and cannot
+    drift. Samplability needs a sqlglot parse; parsing inside
+    :func:`_test_requires_source_table` (a documented PURE function, consulted
+    twice per candidate) would mean ~5 parses of every body per run.
+
+    Gate order, all of which must hold:
+
+    1. ``sample_strategy == "materialised"`` AND ``scope == "sample"`` — DEC-002:
+       the rewrite needs a temp table to point AT, which ``oneshot`` does not
+       have. Ingested tests under ``oneshot`` keep bypassing to source.
+    2. the candidate is a manifest-ingested ``custom_sql`` (``from_manifest`` —
+       NEVER ``type == "custom_sql"``; a *drafted* body keeps the #116
+       ``{{ this }}`` substitution path).
+    3. :func:`is_row_returning` — DEC-003: a #267 count-of-rows scalar is an
+       AGGREGATE, and ``COUNT(*)`` over a hash-mod'd sample returns the SAMPLE
+       SIZE, not the real count. Count-scalars stay routed to source; #267's
+       verdicts are unchanged.
+    4. :func:`plan_relation_rewrite` finds exactly one physical relation, it is
+       the model's own, no CTE alias collides with it, and the token spans agree
+       with the AST (DEC-004 / DEC-005 / DEC-006).
+    5. DEC-010 — at least :data:`_MIN_SAMPLABLE_INGESTED` candidates survive
+       (1)–(4). Below that the CTAS cannot pay for itself, so the survivors are
+       demoted back to a source bypass.
+
+    A refusal is never an error: the candidate simply keeps its pre-#268 routing
+    (source table, full scope). No new ``DropReason``, no new error class.
+    """
+    plans: dict[int, _IngestedSamplePlan] = {}
+    if scope != "sample" or sample_strategy != "materialised":
+        return plans
+
+    source_parts = tuple(model.resolve_this().qualified_name.split("."))
+    for index, (_, test) in enumerate(pairs):
+        if not (isinstance(test, CandidateTestCustomSQL) and test.from_manifest):
+            continue
+        if not is_row_returning(test.sql, dialect=dialect.name):
+            plans[index] = _IngestedSamplePlan(spans=(), reason="aggregate-scalar")
+            continue
+        rewrite = plan_relation_rewrite(test.sql, relation=source_parts, dialect=dialect.name)
+        if not rewrite.samplable:
+            plans[index] = _IngestedSamplePlan(spans=(), reason=rewrite.reason or "zero-match")
+            continue
+        plans[index] = _IngestedSamplePlan(spans=rewrite.spans, reason=None)
+
+    samplable = [index for index, plan in plans.items() if plan.samplable]
+    if len(samplable) < _MIN_SAMPLABLE_INGESTED:
+        for index in samplable:
+            plans[index] = _IngestedSamplePlan(spans=(), reason="below-min-samplable")
+    return plans
+
+
+def _finalise_ingested_plans(
+    pairs: list[tuple[str, CandidateTest]],
+    plans: dict[int, _IngestedSamplePlan],
+    *,
+    model: Model,
+    dialect: Dialect,
+    temp_table_ref: TableRef,
+) -> tuple[dict[int, _IngestedSamplePlan], dict[int, str]]:
+    """Splice each samplable plan to ``temp_table_ref`` and PROVE the result.
+
+    The spans are located before ``materialise_sample`` runs (the routing
+    decision depends on them), but the *rewritten* SQL can only exist once the
+    temp ``TableRef`` does. So the splice
+    (:func:`~signalforge.prune.compiler._build_ingested_rewrite` — a pure string
+    op; ``signalforge.prune`` imports no sqlglot) and the DEC-004 post-condition
+    proof (:func:`verify_relation_rewrite`: parses clean, ZERO residual source
+    relations, exactly ``len(spans)`` temp relations) run here.
+
+    A candidate whose rewrite fails the proof is demoted to a source bypass
+    (``reason="verify-failed"``) — it runs full-scope against the source, exactly
+    as it did pre-#268. It is NEVER dispatched against the temp table without a
+    proven rewrite (the compiler's DEC-007 guard would refuse it anyway; this
+    keeps the verdict real instead of degrading it to ``kept-without-evidence``).
+    """
+    source_parts = tuple(model.resolve_this().qualified_name.split("."))
+    temp_parts = tuple(
+        part
+        for part in (temp_table_ref.project, temp_table_ref.dataset, temp_table_ref.name)
+        if part
+    )
+
+    finalised = dict(plans)
+    overrides: dict[int, str] = {}
+    for index, plan in plans.items():
+        if not plan.samplable:
+            continue
+        _, test = pairs[index]
+        if not isinstance(test, CandidateTestCustomSQL):  # pragma: no cover
+            # Unreachable — ``_plan_ingested_samples`` only records a plan for a
+            # ``from_manifest`` CandidateTestCustomSQL. Fail closed (no rewrite,
+            # so the DEC-007 compiler guard holds) rather than trust the index.
+            finalised[index] = _IngestedSamplePlan(spans=(), reason="verify-failed")
+            continue
+        rewritten = _build_ingested_rewrite(
+            test.sql,
+            spans=plan.spans,
+            table_ref=temp_table_ref,
+            dialect=dialect,
+        )
+        if verify_relation_rewrite(
+            rewritten,
+            source=source_parts,
+            temp=temp_parts,
+            expected_n=len(plan.spans),
+            dialect=dialect.name,
+        ):
+            overrides[index] = rewritten
+        else:
+            finalised[index] = _IngestedSamplePlan(spans=(), reason="verify-failed")
+    return finalised, overrides
+
+
+def _emit_ingested_routing_signals(
+    pairs: list[tuple[str, CandidateTest]],
+    plans: dict[int, _IngestedSamplePlan],
+    *,
+    model_unique_id: str,
+    scope: Scope,
+    sample_strategy: str,
+) -> None:
+    """Emit the #268 DEC-014 ingested-routing observability for ONE prune run.
+
+    Replaces the #154 DEC-007 INFO ("scope=sample requested; evaluating
+    full-scope against source"), which became a half-truth the moment a samplable
+    ingested body could be bound to the materialised temp table: some ingested
+    candidates now genuinely ARE sampled.
+
+    Two surfaces:
+
+    * ONE aggregate **INFO** per ``prune_tests`` call carrying
+      ``{model_unique_id, sample_strategy, ingested_count, sampled_count,
+      bypassed_to_source_count, bypass_reasons}``. ``bypass_reasons`` is a plain
+      ``{reason: count}`` histogram (keys drawn from
+      :data:`~signalforge.ingest._compiled_sql.RELATION_REWRITE_REASONS` ∪
+      :data:`_INGESTED_REJECT_REASONS`) so an operator sees the SHAPE of the
+      bypass without dropping to DEBUG.
+    * One **DEBUG** breadcrumb per bypassed ingested candidate, naming its
+      ``test_anchor`` + ``reason``. DEBUG, not INFO: a wide model with 40
+      ingested tests would otherwise emit 40 INFO lines, and the aggregate
+      already carries the counts.
+
+    Fires only on the ``scope="sample"`` path with at least one ingested
+    candidate — a ``scope="full"`` run has nothing to explain (everything runs
+    full-scope by design) and stays log-silent, exactly as it did pre-#268.
+
+    Call this AFTER the routing block resolves, so the plans reflect the FINAL
+    verdicts (including the ``materialisation-failed`` demotion and the
+    ``verify-failed`` post-condition refusals), not the pre-materialisation ones.
+
+    Observability only — this helper reads state and never mutates it.
+
+    The histogram dict is built OUTSIDE the ``json.dumps(...)`` call and every
+    value is interpolated with lazy-format ``%s``: the DEC-017 logger grep gate
+    walks the WHOLE argument subtree of a ``_LOGGER.<method>(...)`` call and
+    rejects any f-string, including one nested inside a dict literal.
+    """
+    if scope != "sample":
+        return
+
+    ingested_count = 0
+    sampled_count = 0
+    bypass_reasons: dict[str, int] = {}
+    bypassed: list[tuple[str, str]] = []
+    for index, (test_anchor, test) in enumerate(pairs):
+        if not (isinstance(test, CandidateTestCustomSQL) and test.from_manifest):
+            continue
+        ingested_count += 1
+        plan = plans.get(index)
+        if plan is not None and plan.samplable:
+            sampled_count += 1
+            continue
+        # An absent plan means ``_plan_ingested_samples`` never ran its gates —
+        # i.e. the strategy is ``oneshot`` (DEC-002); a present plan always
+        # carries a reason when it isn't samplable.
+        reason = (
+            plan.reason if plan is not None and plan.reason else _INGESTED_REASON_NOT_MATERIALISED
+        )
+        bypass_reasons[reason] = bypass_reasons.get(reason, 0) + 1
+        bypassed.append((test_anchor, reason))
+
+    if not ingested_count:
+        return
+
+    _LOGGER.info(
+        "ingested custom_sql routing: %s",
+        json.dumps(
+            {
+                "model_unique_id": model_unique_id,
+                "sample_strategy": sample_strategy,
+                "ingested_count": ingested_count,
+                "sampled_count": sampled_count,
+                "bypassed_to_source_count": len(bypassed),
+                # Sorted so two runs over the same batch emit byte-identical JSON.
+                "bypass_reasons": dict(sorted(bypass_reasons.items())),
+            }
+        ),
+    )
+    for test_anchor, reason in bypassed:
+        _LOGGER.debug(
+            "ingested custom_sql bypassed to source: %s",
+            json.dumps(
+                {
+                    "model_unique_id": model_unique_id,
+                    "test_anchor": test_anchor,
+                    "reason": reason,
+                }
+            ),
+        )
+
+
 def _test_requires_source_table(
     test: CandidateTest,
     sample_strategy: str | None,
+    *,
+    samplable: bool = False,
 ) -> bool:
     """Return ``True`` when ``test`` is a metadata-aggregate variant that
     MUST be evaluated against the source production table (never a
@@ -522,23 +825,35 @@ def _test_requires_source_table(
     metadata-aggregate variant lands in ONE place, and the two engine
     sites can never drift out of lockstep.
 
-    Behaviour matrix (DEC-010):
+    Behaviour matrix (#171 DEC-010, amended by #268 DEC-002/003/008/010):
 
-      +-----------------------------------------+-----------------+----------+-----------+
-      | Variant                                 | ``materialised``| ``oneshot``| ``None``  |
-      +-----------------------------------------+-----------------+----------+-----------+
-      | :class:`CandidateTestRowCountAnomaly`   | True            | True     | False     |
-      | :class:`CandidateTestRowCountBetween`   | True            | True     | False     |
-      | :class:`CandidateTestUniqueCombination` | True            | True     | False     |
-      | ``custom_sql`` (``from_manifest=True``) | True            | True     | False     |
-      | every other variant                     | False           | False    | False     |
-      +-----------------------------------------+-----------------+----------+-----------+
+      +--------------------------------------------------+---------------+---------+--------+
+      | Variant                                          | ``materialised``|``oneshot``|``None``|
+      +--------------------------------------------------+---------------+---------+--------+
+      | :class:`CandidateTestRowCountAnomalyByPeriod`    | True          | True    | False  |
+      | :class:`CandidateTestRowCountBetween`            | True          | True    | False  |
+      | :class:`CandidateTestUniqueCombination`          | True          | True    | False  |
+      | ``custom_sql`` ``from_manifest``, ``samplable``  | **False**     | n/a     | False  |
+      | ``custom_sql`` ``from_manifest``, not samplable  | True          | True    | False  |
+      | every other variant (incl. drafted ``custom_sql``)| False        | False   | False  |
+      +--------------------------------------------------+---------------+---------+--------+
 
-    A **manifest-ingested** ``custom_sql`` (#154 DEC-007) joins the bypass set:
-    its ``compiled_code`` references dbt's own quoted relation, which the
-    ``{{ this }}`` sample-substitution cannot bind, so it is evaluated
-    full-scope against the source under either sample strategy. A *drafted*
-    ``custom_sql`` (``from_manifest=False``) is NOT bypassed.
+    A **manifest-ingested** ``custom_sql`` (#154 DEC-007) joined the bypass set
+    unconditionally: its ``compiled_code`` references dbt's OWN quoted relation,
+    which the ``{{ this }}`` string substitution cannot bind. Since **#268** it
+    can be sampled instead — but ONLY when the engine has precomputed a verified
+    sqlglot relation-rewrite for it (``samplable=True``, from
+    :func:`_plan_ingested_samples`). ``samplable`` is a **pure** keyword arg: this
+    helper never parses SQL, so its direct unit tests (2 positional args) stay
+    valid and the parse happens ONCE per body, not five times.
+
+    ``samplable`` can only be ``True`` under ``materialised`` + ``scope="sample"``
+    (DEC-002 — ``oneshot`` has no temp table to rewrite the relation TO), and
+    never for a #267 count-of-rows scalar (DEC-003 — an aggregate over a
+    hash-mod'd sample is semantically meaningless), and never for a lone samplable
+    candidate (DEC-010 — the ``SELECT *`` CTAS cannot pay for itself). A *drafted*
+    ``custom_sql`` (``from_manifest=False``) is never bypassed and never carries a
+    plan; it keeps the #116 substitution path byte-unchanged.
 
     Rationale:
       * **row_count_between / row_count_anomaly_by_period** —
@@ -579,16 +894,20 @@ def _test_requires_source_table(
         # ``scope="full"`` — no sampling; ``compile_table_ref`` already
         # resolves to source. No bypass needed.
         return False
-    # #154 DEC-007 — a manifest-ingested ``custom_sql`` body carries dbt's
-    # already-Jinja-resolved ``compiled_code``, which references the relation
-    # with dbt's OWN quoting scheme. The ``{{ this }}`` sample-substitution
-    # cannot bind it, so under ``scope=sample`` it would silently degrade to
-    # ``kept-without-evidence``. Route it to the source table (full-scope)
-    # under EITHER sample strategy — exactly like the metadata-aggregate
-    # variants below. A *drafted* ``custom_sql`` (``from_manifest=False``)
-    # is NOT bypassed and keeps its existing sample behaviour byte-unchanged.
+    # #154 DEC-007 / #268 DEC-008 — a manifest-ingested ``custom_sql`` body
+    # carries dbt's already-Jinja-resolved ``compiled_code``, which references
+    # the relation with dbt's OWN quoting scheme. The ``{{ this }}`` string
+    # substitution cannot bind it. Pre-#268 that meant an unconditional bypass to
+    # the source table (full-scope). Since #268 the engine can instead precompute
+    # a VERIFIED sqlglot relation-rewrite binding the body to the materialised
+    # temp table — ``samplable=True`` says it has one in hand, so the candidate
+    # does NOT need the source. Everything else (a count-scalar, ``oneshot``, an
+    # unparseable / multi-relation / CTE-colliding body, a lone samplable
+    # candidate) still bypasses. A *drafted* ``custom_sql``
+    # (``from_manifest=False``) is NOT bypassed and keeps its existing sample
+    # behaviour byte-unchanged.
     if isinstance(test, CandidateTestCustomSQL) and test.from_manifest:
-        return True
+        return not samplable
     return isinstance(
         test,
         (
@@ -681,6 +1000,7 @@ def _decide_from_test_result(
     capture_failure_rows: int,
     stats: AnomalyTestStats | None = None,
     as_of: date | None = None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Route a successful :class:`TestResult` into a :class:`PruneDecision`.
 
@@ -711,6 +1031,7 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_always_passes(sampled_rows, scope),
             sample_failures=None,
+            bypassed_to_source=bypassed_to_source,
             stats=stats,
             as_of=as_of,
         )
@@ -728,6 +1049,7 @@ def _decide_from_test_result(
             compiled_sql=compiled_sql,
             why=_why_failed_on_known_clean_data(failure_count, sampled_rows),
             sample_failures=sample_failures if capture_failure_rows > 0 else None,
+            bypassed_to_source=bypassed_to_source,
             stats=stats,
             as_of=as_of,
         )
@@ -744,6 +1066,7 @@ def _decide_from_test_result(
         compiled_sql=compiled_sql,
         why=_why_kept(failure_count, sampled_rows, scope),
         sample_failures=sample_failures if capture_failure_rows > 0 else None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -756,6 +1079,7 @@ def _decide_requires_future_data(
     sentinel: _RequiresFutureData,
     elapsed_ms: int,
     scope: Scope,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a ``relationships`` test whose
     parent isn't in the manifest (DEC-026).
@@ -777,6 +1101,7 @@ def _decide_requires_future_data(
         compiled_sql="",
         why=sentinel.reason,
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
     )
 
 
@@ -787,6 +1112,7 @@ def _decide_kept_without_evidence_invalid_identifier(
     sentinel: _InvalidIdentifier,
     elapsed_ms: int,
     scope: Scope,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a test whose ``column`` /
     ``field`` failed the SQL-identifier shape check (defence-in-depth).
@@ -811,6 +1137,7 @@ def _decide_kept_without_evidence_invalid_identifier(
         compiled_sql="",
         why=sentinel.reason,
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
     )
 
 
@@ -825,6 +1152,7 @@ def _decide_kept_without_evidence_warehouse_error(
     scope: Scope,
     stats: AnomalyTestStats | None = None,
     as_of: date | None = None,
+    bypassed_to_source: bool = False,
 ) -> PruneDecision:
     """Build a :class:`PruneDecision` for a test that raised a typed
     :class:`WarehouseError` during execution.
@@ -848,6 +1176,7 @@ def _decide_kept_without_evidence_warehouse_error(
         compiled_sql=compiled_sql,
         why=_why_kept_without_evidence_warehouse_error(exc),
         sample_failures=None,
+        bypassed_to_source=bypassed_to_source,
         stats=stats,
         as_of=as_of,
     )
@@ -1349,32 +1678,14 @@ def prune_tests(
     is_trusted = model.unique_id in resolved_config.trusted_models
     scope: Scope = resolved_config.scope
 
-    # #154 DEC-007 — one INFO when the operator requested ``scope=sample`` but
-    # the batch carries manifest-ingested ``custom_sql`` candidates. Those are
-    # ALWAYS evaluated full-scope against the source (dbt's own quoted relation
-    # cannot bind the deterministic sample), so the sample request is a no-op
-    # for them; the routing lives in :func:`_test_requires_source_table`. Fires
-    # at most once per ``prune_tests`` call, and only on the sample path — a
-    # ``scope=full`` run (or a batch with no ingested candidates) stays
-    # log-silent. Lazy-format JSON per the DEC-017 logger gate; never
-    # f-string-interpolate user-controlled values.
-    if scope == "sample":
-        ingested_count = sum(
-            1
-            for _, test in pairs
-            if isinstance(test, CandidateTestCustomSQL) and test.from_manifest
-        )
-        if ingested_count:
-            _LOGGER.info(
-                "ingested custom_sql: scope=sample requested; "
-                "evaluating full-scope against source: %s",
-                json.dumps(
-                    {
-                        "model_unique_id": model.unique_id,
-                        "ingested_count": ingested_count,
-                    }
-                ),
-            )
+    # The #154 DEC-007 INFO ("scope=sample requested; evaluating full-scope
+    # against source") used to fire here. It became a half-truth once #268 let a
+    # samplable ingested body bind the materialised temp table, so it is replaced
+    # by the DEC-014 aggregate INFO + per-test DEBUG breadcrumbs emitted from
+    # :func:`_emit_ingested_routing_signals` — which fires BELOW, after the
+    # routing block resolves, so it reports the FINAL verdicts (including the
+    # ``materialisation-failed`` / ``verify-failed`` demotions) rather than the
+    # pre-materialisation ones.
 
     total_budget_ms = resolved_config.total_budget_seconds * 1000
 
@@ -1440,8 +1751,33 @@ def prune_tests(
         # (compile_table_ref already resolves to source), preserving the
         # ``else`` branch's byte-equal routing.
         bypass_strategy: str | None = resolved_config.sample_strategy if scope == "sample" else None
+
+        # #268 DEC-008 — precompute the ingested relation-rewrite plan ONCE,
+        # keyed by index into ``pairs``, BEFORE the routing block. Both routing
+        # sites (this short-circuit and the per-test ``per_test_table_ref``
+        # override below — the #170 two-conditional rule) read the SAME plan, so
+        # they cannot disagree about which ingested candidates are sampled. The
+        # plan is pure: no warehouse call, no logging, one sqlglot parse per body.
+        ingested_plans = _plan_ingested_samples(
+            pairs,
+            model=model,
+            dialect=dialect,
+            scope=scope,
+            sample_strategy=resolved_config.sample_strategy,
+        )
+        # Populated only on the successful-materialisation path, once the temp
+        # ``TableRef`` exists (:func:`_finalise_ingested_plans`). An absent entry
+        # means "no verified rewrite" — the compiler's DEC-007 guard then refuses
+        # any non-source binding, so a routing bug cannot full-scan production.
+        ingested_overrides: dict[int, str] = {}
+
+        def _is_samplable(index: int) -> bool:
+            plan = ingested_plans.get(index)
+            return plan is not None and plan.samplable
+
         all_bypass_to_source = bool(pairs) and all(
-            _test_requires_source_table(test, bypass_strategy) for _, test in pairs
+            _test_requires_source_table(test, bypass_strategy, samplable=_is_samplable(index))
+            for index, (_, test) in enumerate(pairs)
         )
 
         if all_bypass_to_source:
@@ -1460,67 +1796,139 @@ def prune_tests(
                     partition_filter=resolved_config.partition_filter,
                 )
             except WarehouseError as exc:
-                # DEC-009 of issue #22 — single degraded-run WARNING
-                # fires at the head of the conservative-bias routing
-                # path BEFORE any audit-write iteration. Lazy-format
-                # JSON per the layer-wide DEC-017 logger gate; never
-                # f-string-interpolate user-controlled values.
-                _LOGGER.warning(
-                    "materialisation failed; routing all tests to kept-without-evidence: %s",
-                    json.dumps(
-                        {
-                            "model_unique_id": model.unique_id,
-                            "candidate_count": len(pairs),
-                            "error_class": type(exc).__name__,
-                            "error_message": str(exc)[:200],
-                        }
-                    ),
+                # #268 DEC-009 — the materialisation-failure FALLBACK.
+                #
+                # Pre-#268 an all-ingested batch short-circuited above and
+                # ``materialise_sample`` was never called. Now that a samplable
+                # ingested batch breaks the short-circuit, it IS called — and on
+                # a >100M-row unpartitioned model BigQuery raises
+                # ``SamplingRequiresPartitionFilterError`` /
+                # ``UnknownTableSizeError`` BEFORE it even issues the CTAS.
+                # Routing every candidate to ``kept-without-evidence`` there
+                # would take ``prune-existing --scope=sample`` from N real
+                # verdicts to ZERO pruning on exactly the tables operators care
+                # most about (AR-B5).
+                #
+                # So: when NOTHING in the batch genuinely needs the sample — i.e.
+                # every candidate is either a bypass-to-source variant or a
+                # samplable ingested body (which has a perfectly good full-scope
+                # form: its own, unrewritten ``compiled_code`` against the
+                # source) — re-route to the source at ``scope="full"`` and carry
+                # on. Only a DRAFTED row-level test genuinely needs the sample and
+                # has no defined source fallback; with one of those in the batch,
+                # the blanket conservative-bias path below stands unchanged.
+                needs_sample = any(
+                    not (_is_samplable(index) or _test_requires_source_table(test, bypass_strategy))
+                    for index, (_, test) in enumerate(pairs)
                 )
-                # Fail-closed audit preserved (DEC-016 of #6): one
-                # PruneEvent per candidate, even on the all-failed path.
-                # The audit-write loop runs to completion unless the
-                # writer itself fails — no early return.
-                for test_anchor, test in pairs:
-                    decision = _decide_kept_without_evidence_materialisation_failed(
-                        test=test,
-                        test_anchor=test_anchor,
-                        exc=exc,
-                        scope=scope,
+                if not needs_sample:
+                    _LOGGER.warning(
+                        "materialisation failed; falling back to full-scope against source: %s",
+                        json.dumps(
+                            {
+                                "model_unique_id": model.unique_id,
+                                "candidate_count": len(pairs),
+                                "error_class": type(exc).__name__,
+                                "error_message": str(exc)[:200],
+                                "fallback": "source",
+                            }
+                        ),
                     )
-                    _write_audit_or_abort(
-                        decision,
+                    # Demote every samplable ingested plan: there is no temp table
+                    # to rewrite the relation TO, so each body runs verbatim
+                    # against the source (its pre-#268 behaviour). ``_is_samplable``
+                    # closes over the NAME, so both routing sites see the demotion.
+                    # A plan already rejected (multi-relation / aggregate-scalar /
+                    # unparseable / below-min-samplable) KEEPS its reason, so the
+                    # DEC-014 histogram reports the true cause rather than
+                    # over-writing every entry with ``materialisation-failed``.
+                    ingested_plans = {
+                        index: (
+                            _IngestedSamplePlan(spans=(), reason="materialisation-failed")
+                            if plan.samplable
+                            else plan
+                        )
+                        for index, plan in ingested_plans.items()
+                    }
+                    ingested_overrides = {}
+                    compile_table_ref = source_table_ref
+                    compile_scope = "full"
+                    sample_bucket = None
+                    compile_partition_filter = None
+                else:
+                    # DEC-009 of issue #22 — single degraded-run WARNING
+                    # fires at the head of the conservative-bias routing
+                    # path BEFORE any audit-write iteration. Lazy-format
+                    # JSON per the layer-wide DEC-017 logger gate; never
+                    # f-string-interpolate user-controlled values.
+                    _LOGGER.warning(
+                        "materialisation failed; routing all tests to kept-without-evidence: %s",
+                        json.dumps(
+                            {
+                                "model_unique_id": model.unique_id,
+                                "candidate_count": len(pairs),
+                                "error_class": type(exc).__name__,
+                                "error_message": str(exc)[:200],
+                            }
+                        ),
+                    )
+                    # Fail-closed audit preserved (DEC-016 of #6): one
+                    # PruneEvent per candidate, even on the all-failed path.
+                    # The audit-write loop runs to completion unless the
+                    # writer itself fails — no early return.
+                    for test_anchor, test in pairs:
+                        decision = _decide_kept_without_evidence_materialisation_failed(
+                            test=test,
+                            test_anchor=test_anchor,
+                            exc=exc,
+                            scope=scope,
+                        )
+                        _write_audit_or_abort(
+                            decision,
+                            model_unique_id=model.unique_id,
+                            config_hash=config_hash,
+                            audit_path=resolved_audit_path,
+                        )
+                        decisions.append(decision)
+
+                    total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
+                    _maybe_emit_kept_rate_warning(
+                        decisions,
                         model_unique_id=model.unique_id,
-                        config_hash=config_hash,
-                        audit_path=resolved_audit_path,
+                        threshold=resolved_config.min_kept_rate_warn,
                     )
-                    decisions.append(decision)
-
-                total_elapsed_ms = max(0, _now_monotonic_ms() - start_ms)
-                _maybe_emit_kept_rate_warning(
-                    decisions,
-                    model_unique_id=model.unique_id,
-                    threshold=resolved_config.min_kept_rate_warn,
+                    return PruneResult(
+                        model_unique_id=model.unique_id,
+                        decisions=tuple(decisions),
+                        elapsed_ms=total_elapsed_ms,
+                        signalforge_version=_SIGNALFORGE_VERSION,
+                    )
+            else:
+                # Materialisation succeeded — every per-test compile
+                # references the temp table directly. Effective compile
+                # scope is "full" so the compiler does NOT wrap a
+                # redundant deterministic-sample CTE on top of an
+                # already-sampled table; the decision's user-facing
+                # ``scope`` field stays at ``config.scope``.
+                compile_table_ref = materialised_ref
+                compile_scope = "full"
+                sample_bucket = None
+                # The materialisation already filtered the partitions
+                # (Q5 of issue #22 — partition_filter applies once inside
+                # the CTAS WHERE clause, not on every per-test query).
+                compile_partition_filter = None
+                # #268 DEC-008 — the temp ``TableRef`` finally exists, so splice
+                # each samplable plan's spans to it and PROVE the DEC-004 AST
+                # post-condition. A rewrite that fails the proof is demoted to a
+                # source bypass (a real full-scope verdict), never dispatched
+                # unproven.
+                ingested_plans, ingested_overrides = _finalise_ingested_plans(
+                    pairs,
+                    ingested_plans,
+                    model=model,
+                    dialect=dialect,
+                    temp_table_ref=materialised_ref,
                 )
-                return PruneResult(
-                    model_unique_id=model.unique_id,
-                    decisions=tuple(decisions),
-                    elapsed_ms=total_elapsed_ms,
-                    signalforge_version=_SIGNALFORGE_VERSION,
-                )
-
-            # Materialisation succeeded — every per-test compile
-            # references the temp table directly. Effective compile
-            # scope is "full" so the compiler does NOT wrap a
-            # redundant deterministic-sample CTE on top of an
-            # already-sampled table; the decision's user-facing
-            # ``scope`` field stays at ``config.scope``.
-            compile_table_ref = materialised_ref
-            compile_scope = "full"
-            sample_bucket = None
-            # The materialisation already filtered the partitions
-            # (Q5 of issue #22 — partition_filter applies once inside
-            # the CTAS WHERE clause, not on every per-test query).
-            compile_partition_filter = None
         else:
             # ``oneshot`` strategy OR ``scope="full"`` (no sampling at
             # all) — v0.1 path. The bucket lookup runs only when
@@ -1534,9 +1942,22 @@ def prune_tests(
                 sample_size=resolved_config.sample_size,
             )
 
+        # #268 DEC-014 — the ingested-routing observability. Emitted here, after
+        # every routing arm has settled ``ingested_plans`` (the
+        # materialisation-failed demotion and the verify-failed refusals
+        # included), so the counts and the reason histogram describe what
+        # ACTUALLY happened rather than the pre-materialisation guess. Read-only.
+        _emit_ingested_routing_signals(
+            pairs,
+            ingested_plans,
+            model_unique_id=model.unique_id,
+            scope=scope,
+            sample_strategy=resolved_config.sample_strategy,
+        )
+
         budget_exhausted = False
 
-        for test_anchor, test in pairs:
+        for test_index, (test_anchor, test) in enumerate(pairs):
             # Total-budget gate (DEC-011 of #6 / DEC-010 of #22 — the
             # watchdog ticks across both materialisation AND the
             # per-test loop). Checked BEFORE any compile or warehouse
@@ -1592,11 +2013,31 @@ def prune_tests(
             # every variant: the override becomes a no-op and
             # ``per_test_table_ref = compile_table_ref = source_table_ref``
             # (byte-equal pre-#171 routing on the full path).
-            per_test_table_ref = (
-                source_table_ref
-                if _test_requires_source_table(test, bypass_strategy)
-                else compile_table_ref
+            #
+            # #268 DEC-008: a manifest-ingested ``custom_sql`` with a VERIFIED
+            # relation rewrite in ``ingested_overrides`` (``samplable``) does NOT
+            # bypass — it binds to the materialised temp table, and the proven
+            # rewrite rides along as ``ingested_sql_override``. Both come from
+            # the SAME precomputed plan the short-circuit above consulted, so
+            # routing and compilation agree structurally rather than
+            # coincidentally. An ingested candidate WITHOUT an override (a
+            # count-scalar, an unparseable / multi-relation body, the DEC-010
+            # single-candidate case, ``oneshot``, or a post-materialisation
+            # verify failure) still bypasses to source — and if a routing bug
+            # ever bound one to the temp table anyway, the compiler's DEC-007
+            # fail-closed guard refuses it rather than full-scan production.
+            #
+            # #268 DEC-011: the SAME predicate that chooses the table ref also
+            # populates :attr:`PruneDecision.bypassed_to_source`. ``scope`` is
+            # copied from ``config.scope``, so a bypassed test is still recorded
+            # as ``scope="sample"`` — the flag is what tells a reviewer whether
+            # the verdict came from the sample or from a full scan of the
+            # source. Reading it off the same call means the audit field and the
+            # actual routing cannot drift.
+            bypassed_to_source = _test_requires_source_table(
+                test, bypass_strategy, samplable=_is_samplable(test_index)
             )
+            per_test_table_ref = source_table_ref if bypassed_to_source else compile_table_ref
 
             # Compile the candidate test to failing-rows SQL. Returns
             # either a string (the SELECT), a ``_RequiresFutureData``
@@ -1619,6 +2060,7 @@ def prune_tests(
                 sample_bucket=sample_bucket,
                 partition_filter=compile_partition_filter,
                 as_of=as_of,
+                ingested_sql_override=ingested_overrides.get(test_index),
             )
             if isinstance(compile_result, _RequiresFutureData):
                 decision = _decide_requires_future_data(
@@ -1627,6 +2069,7 @@ def prune_tests(
                     sentinel=compile_result,
                     elapsed_ms=0,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -1644,6 +2087,7 @@ def prune_tests(
                     sentinel=compile_result,
                     elapsed_ms=0,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -1720,6 +2164,7 @@ def prune_tests(
                         compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         as_of=as_of,
                     )
                     _write_audit_or_abort(
@@ -1814,6 +2259,7 @@ def prune_tests(
                                 ),
                                 elapsed_ms=elapsed_ms,
                                 scope=scope,
+                                bypassed_to_source=bypassed_to_source,
                                 stats=stats,
                                 as_of=as_of,
                             )
@@ -1848,6 +2294,7 @@ def prune_tests(
                         compiled_sql_hash=_build_compiled_sql_hash_or_empty(stats_sql_active),
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         as_of=as_of,
                     )
                     _write_audit_or_abort(
@@ -1887,6 +2334,7 @@ def prune_tests(
                         compiled_sql_hash=violation_sql_hash,
                         elapsed_ms=elapsed_ms,
                         scope=scope,
+                        bypassed_to_source=bypassed_to_source,
                         stats=stats,
                         as_of=as_of,
                     )
@@ -1914,6 +2362,7 @@ def prune_tests(
                     scope=scope,
                     is_trusted=is_trusted,
                     capture_failure_rows=resolved_config.capture_failure_rows,
+                    bypassed_to_source=bypassed_to_source,
                     stats=stats,
                     as_of=as_of,
                 )
@@ -1958,6 +2407,7 @@ def prune_tests(
                     compiled_sql_hash=compiled_sql_hash,
                     elapsed_ms=elapsed_ms,
                     scope=scope,
+                    bypassed_to_source=bypassed_to_source,
                 )
                 _write_audit_or_abort(
                     decision,
@@ -1989,6 +2439,7 @@ def prune_tests(
                 scope=scope,
                 is_trusted=is_trusted,
                 capture_failure_rows=resolved_config.capture_failure_rows,
+                bypassed_to_source=bypassed_to_source,
             )
             _write_audit_or_abort(
                 decision,

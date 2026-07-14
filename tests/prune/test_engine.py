@@ -57,6 +57,7 @@ from signalforge.warehouse.base import WarehouseAdapter
 from signalforge.warehouse.errors import (
     BytesBilledExceededError,
     MaterialisationFailedError,
+    SamplingRequiresPartitionFilterError,
     TableNotFoundError,
     UnknownTableSizeError,
 )
@@ -2425,7 +2426,7 @@ def test_prune_tests_materialised_strategy_against_pinned_fixture(
     assert row["model_unique_id"] == "model.shop.orders"
     assert "_SESSION" in row["compiled_sql"]
     assert re.search(r"_sf_sample_[0-9a-f]{16}", row["compiled_sql"]) is not None
-    assert row["audit_schema_version"] == 3
+    assert row["audit_schema_version"] == 4
 
     # Cross-check against the strict drift-detector mirror so the
     # in-memory snapshot remains valid against the read-back contract.
@@ -5430,6 +5431,39 @@ def _ingested_custom_sql_candidates(sql: str) -> CandidateSchema:
     )
 
 
+# --- #268 US-006 (DEC-014) — the ingested-routing observability -------------
+#
+# The engine logs lazy-format ``%s`` + ``json.dumps({...})`` (the DEC-017 grep
+# gate), so a test reads the SIGNAL, not the prose: decode the payload and
+# assert on the decoded dict. Keying on the message prefix keeps these helpers
+# from picking up any sibling INFO/DEBUG the engine emits.
+_INGESTED_ROUTING_INFO_PREFIX = "ingested custom_sql routing:"
+_INGESTED_BYPASS_DEBUG_PREFIX = "ingested custom_sql bypassed to source:"
+
+
+def _decode_log_payloads(
+    caplog: pytest.LogCaptureFixture, *, level: str, prefix: str
+) -> list[dict[str, object]]:
+    """Decode the ``json.dumps`` payload of every matching engine log record."""
+    payloads: list[dict[str, object]] = []
+    for record in caplog.records:
+        message = record.getMessage()
+        if record.levelname != level or not message.startswith(prefix):
+            continue
+        payloads.append(json.loads(message[len(prefix) :].strip()))
+    return payloads
+
+
+def _ingested_routing_payloads(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    """The decoded payload of every DEC-014 aggregate INFO (expected: exactly 1)."""
+    return _decode_log_payloads(caplog, level="INFO", prefix=_INGESTED_ROUTING_INFO_PREFIX)
+
+
+def _ingested_bypass_breadcrumbs(caplog: pytest.LogCaptureFixture) -> list[dict[str, object]]:
+    """The decoded payload of every DEC-014 per-test bypass DEBUG breadcrumb."""
+    return _decode_log_payloads(caplog, level="DEBUG", prefix=_INGESTED_BYPASS_DEBUG_PREFIX)
+
+
 def test_prune_tests_ingested_custom_sql_tautology_dropped_always_passes(
     tmp_path: Path,
 ) -> None:
@@ -5537,11 +5571,20 @@ def test_prune_tests_ingested_custom_sql_non_deterministic_kept_without_evidence
 def test_prune_tests_ingested_custom_sql_under_sample_evaluates_full_scope(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """DEC-007 (behavioural, not just a decision snapshot): an ingested body
-    requested under ``scope=sample`` is evaluated FULL-SCOPE against the
-    source. The dispatched SQL references the source relation and NEVER a
+    """#154 DEC-007, narrowed by #268 DEC-010 (behavioural, not just a decision
+    snapshot): a LONE ingested body requested under ``scope=sample`` is still
+    evaluated FULL-SCOPE against the source. Since #268 an ingested body CAN be
+    relation-rewritten onto the materialised sample — but only from TWO samplable
+    candidates up (the ``SELECT *`` CTAS reads every column and cannot pay for
+    itself on one narrow test), so this single-candidate batch keeps bypassing.
+
+    The dispatched SQL references the source relation and NEVER a
     ``_SESSION._sf_sample_*`` temp table, no ``materialise_sample`` is called
-    (all candidates bypass to source), and exactly ONE INFO fires."""
+    (all candidates bypass to source), and exactly ONE DEC-014 aggregate INFO
+    fires — reporting ``sampled_count=0`` and the ``below-min-samplable`` reason
+    that DEC-010 demoted this lone candidate with (US-006 replaced the old #154
+    "scope=sample requested" wording, which became a half-truth once a sibling
+    candidate could be sampled)."""
     audit_path = tmp_path / "prune.jsonl"
     fake = FakeBigQueryClient(project="fake_project")
     # Only expect the COUNT(*) — NO expect_materialise_sample / expect_get_table:
@@ -5579,15 +5622,18 @@ def test_prune_tests_ingested_custom_sql_under_sample_evaluates_full_scope(
     assert decision.decision == "dropped"
     assert decision.reason == "always-passes"
 
-    info_records = [
-        r
-        for r in caplog.records
-        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
-    ]
-    assert len(info_records) == 1, (
-        "expected exactly ONE ingested-full-scope INFO; got "
-        f"{[r.getMessage() for r in info_records]}"
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1, (
+        f"expected exactly ONE ingested-routing INFO; got {len(payloads)}: {payloads}"
     )
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "materialised",
+        "ingested_count": 1,
+        "sampled_count": 0,
+        "bypassed_to_source_count": 1,
+        "bypass_reasons": {"below-min-samplable": 1},
+    }
     fake.assert_all_expectations_met()
 
 
@@ -5661,12 +5707,18 @@ def test_prune_tests_mixed_ingested_and_drafted_per_test_routing(
     assert "_SESSION" not in ingested_decision.compiled_sql
     assert "_sf_sample_" not in ingested_decision.compiled_sql
 
-    info_records = [
-        r
-        for r in caplog.records
-        if r.levelname == "INFO" and "scope=sample requested" in r.getMessage()
-    ]
-    assert len(info_records) == 1
+    # DEC-014 — the aggregate INFO explains WHY the ingested body was not
+    # sampled: ``oneshot`` has no temp table to rewrite its relation TO (DEC-002).
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "oneshot",
+        "ingested_count": 1,
+        "sampled_count": 0,
+        "bypassed_to_source_count": 1,
+        "bypass_reasons": {"strategy-not-materialised": 1},
+    }
     fake.assert_all_expectations_met()
 
 
@@ -5994,4 +6046,1423 @@ def test_prune_tests_mixed_ingested_count_scalar_and_drafted_oneshot(
     assert not_null.decision == "dropped"
     assert not_null.reason == "always-passes"
 
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #268 US-004 (DEC-008 / DEC-009 / DEC-010) — engine routing for SAMPLED
+# manifest-ingested custom_sql.
+#
+# Since #268 a manifest-ingested body CAN be evaluated against the
+# materialised sample — but only via a sqlglot relation-rewrite the engine
+# precomputes (``plan_relation_rewrite``), splices (``_build_ingested_rewrite``)
+# and PROVES (``verify_relation_rewrite``) before threading it into the
+# compiler as ``ingested_sql_override``. Three gates narrow it:
+#
+#   * DEC-002 — ``materialised`` + ``scope="sample"`` only (``oneshot`` has no
+#     temp table to rewrite the relation TO);
+#   * DEC-003 — never a #267 count-of-rows scalar (an aggregate over a
+#     hash-mod'd sample returns the SAMPLE SIZE, not the real count);
+#   * DEC-010 — at least TWO samplable ingested candidates (the ``SELECT *``
+#     CTAS reads every column; one narrow test can never pay for it).
+#
+# Plus DEC-009: when ``materialise_sample`` fails and NOTHING in the batch
+# genuinely needs the sample, fall back to full-scope against the source
+# rather than blanket-degrading every candidate to kept-without-evidence.
+#
+# Every assertion keys on the DISPATCHED SQL (``decision.compiled_sql``), not
+# the routed decision alone — a decision snapshot passes even when the routing
+# regressed and the body silently full-scanned production.
+# ---------------------------------------------------------------------------
+
+# A SECOND row-returning ingested body over the same relation, so a batch can
+# carry the >= 2 samplable candidates DEC-010 requires. Distinct WHERE clause →
+# a distinct fake matcher → order-independent pairing.
+_INGESTED_SOURCE_BODY_2 = (
+    "select id\nfrom `fake_project`.`dataset`.`orders`\nwhere customer_id is null"
+)
+
+# The production ``materialise_sample`` derives the temp table's 16-hex run_id
+# itself (from the source ref + version + sample size + partition filter), so the
+# dispatched SQL carries THAT name, not the fake's placeholder. Pin the SHAPE —
+# ``_SESSION._sf_sample_<16hex>`` — exactly as the #22 / #116 precedents do.
+_SAMPLE_TEMP_RE = re.compile(r"`_SESSION\._sf_sample_[0-9a-f]{16}`")
+
+
+def _two_samplable_ingested_candidates() -> CandidateSchema:
+    """Two row-returning manifest-ingested bodies over the model's own relation
+    — the minimum DEC-010 admits for sampling."""
+    return CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+        ),
+    )
+
+
+def test_prune_tests_two_samplable_ingested_dispatch_against_the_materialised_temp(
+    tmp_path: Path,
+) -> None:
+    """THE #268 behavioural pin (Direction-1 shape, mirroring
+    ``test_prune_tests_custom_sql_single_table_references_temp_table_under_materialised``):
+    under ``materialised`` + ``scope="sample"``, two samplable ingested bodies
+    are relation-rewritten and DISPATCHED against ``_SESSION._sf_sample_<16hex>``
+    — the source relation appears in neither.
+
+    A compiler snapshot certifies SQL shape, not routing: the bug this pins
+    (a silent full-scan of production booked as an evidence-backed verdict at
+    ``scope="sample"``) lives in the ENGINE. Both fake matchers key on each
+    body's own WHERE clause, so the pairing is iteration-order independent and
+    the match itself proves the rewritten body reached warehouse dispatch.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 3}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        _two_samplable_ingested_candidates(),
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    for decision in result.decisions:
+        # The load-bearing assertions: the dispatched SQL binds the TEMP table
+        # and not one byte of the production relation survives.
+        assert _SAMPLE_TEMP_RE.search(decision.compiled_sql) is not None
+        assert "orders" not in decision.compiled_sql
+        assert "`fake_project`.`dataset`" not in decision.compiled_sql
+        # dbt's own bytes outside the spliced relation survive verbatim.
+        assert decision.compiled_sql.startswith("select id\nfrom ")
+
+    by_sql = {d.test.sql: d for d in result.decisions}  # type: ignore[union-attr]
+    assert by_sql[_INGESTED_SOURCE_BODY].decision == "dropped"
+    assert by_sql[_INGESTED_SOURCE_BODY].reason == "always-passes"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].decision == "kept"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].reason == "kept"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_single_samplable_ingested_still_bypasses_no_materialise(
+    tmp_path: Path,
+) -> None:
+    """DEC-010 — ONE samplable ingested candidate is below the CTAS break-even
+    (``SELECT *`` reads every column; a narrow ingested test on a wide table is
+    column-pruned at source), so it keeps bypassing to the source at full scope
+    and ``materialise_sample`` is NOT called.
+
+    The fake registers NO ``expect_materialise_sample`` / ``expect_get_table``:
+    any sampling pre-work would raise ``unexpected query``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY),
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.compiled_sql == _INGESTED_SOURCE_BODY
+    assert "_sf_sample_" not in decision.compiled_sql
+    assert decision.decision == "dropped"
+    assert decision.reason == "always-passes"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_all_count_scalar_ingested_never_materialises(tmp_path: Path) -> None:
+    """DEC-003 — the exact regression #268 could silently introduce: a batch of
+    manifest-ingested COUNT-of-rows scalars must NOT trigger a
+    ``materialise_sample`` CTAS (billing bytes for a sample the batch cannot
+    use), because an aggregate over a hash-mod'd sample returns the SAMPLE SIZE,
+    not the model's real count.
+
+    TWO count-scalars — enough to clear DEC-010's threshold if the
+    ``is_row_returning`` gate were ever dropped — so this test fails loud if the
+    count-scalar gate regresses, not merely because the batch was too small.
+    The fake registers NO ``expect_materialise_sample``: a CTAS raises.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    second_scalar = (
+        "select count(*)\nfrom `fake_project`.`dataset`.`orders`\nwhere customer_id is null"
+    )
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=second_scalar, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    for decision in result.decisions:
+        # Source-routed, carrying #267's failing-rows restructure. Never the temp.
+        assert "sf_agg_value <> 0" in decision.compiled_sql
+        assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+        assert "_SESSION" not in decision.compiled_sql
+        assert "_sf_sample_" not in decision.compiled_sql
+        assert decision.decision == "dropped"
+        assert decision.reason == "always-passes"
+    # No CTAS was ever queued; had one been issued the fake would have raised.
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_mixed_samplable_ingested_count_scalar_and_drafted_routing(
+    tmp_path: Path,
+) -> None:
+    """LOAD-BEARING mixed-candidate routing pin (prune-engine.md § "#170
+    lessons" — a single-variant batch only exercises the ``all_bypass_to_source``
+    short-circuit; only a MIXED batch exercises the per-test
+    ``per_test_table_ref`` override). One model, FOUR candidates under
+    ``materialised`` + ``scope="sample"``:
+
+      * 2× samplable manifest-ingested custom_sql → relation-rewritten onto the
+        MATERIALISED temp (clears DEC-010's >= 2 threshold);
+      * 1× manifest-ingested COUNT-scalar → bypasses to SOURCE with #267's
+        restructure (DEC-003);
+      * 1× drafted ``not_null`` → the MATERIALISED temp via the #22 substitution.
+
+    Three different destinations in one batch, all driven off the SAME
+    precomputed plan the short-circuit consulted.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=materialised_ref,
+    )
+    # Distinct matchers → order-independent pairing; each match proves that
+    # dispatched shape actually reached the warehouse.
+    # The samplable body and the count-scalar SHARE the ``status = 'BAD'``
+    # predicate, so the samplable matcher anchors on the REWRITTEN relation
+    # (the temp table) — the count-scalar keeps dbt's source relation and can
+    # never match it. Ambiguous matchers would let the queue order decide the
+    # pairing and quietly hide a routing regression.
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 2}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 4
+    not_null = next(d for d in result.decisions if d.test.type == "not_null")
+    by_sql = {
+        d.test.sql: d  # type: ignore[union-attr]
+        for d in result.decisions
+        if d.test.type == "custom_sql"
+    }
+
+    # The two samplable ingested bodies bind the TEMP table.
+    for body in (_INGESTED_SOURCE_BODY, _INGESTED_SOURCE_BODY_2):
+        sampled = by_sql[body]
+        assert _SAMPLE_TEMP_RE.search(sampled.compiled_sql) is not None
+        assert "orders" not in sampled.compiled_sql
+
+    # The count-scalar bypasses to SOURCE, restructured (DEC-003).
+    scalar = by_sql[_INGESTED_COUNT_SCALAR_BODY]
+    assert scalar.compiled_sql == _EXPECTED_COUNT_SCALAR_RESTRUCTURE
+    assert "`fake_project`.`dataset`.`orders`" in scalar.compiled_sql
+    assert "_sf_sample_" not in scalar.compiled_sql
+
+    # The drafted built-in binds the TEMP table via the #22 substitution.
+    assert "_SESSION._sf_sample_" in not_null.compiled_sql
+    assert "fake_project.dataset.orders" not in not_null.compiled_sql
+
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_failure_falls_back_to_source_for_ingested_batch(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-009 (the AR-B5 regression) — ``materialise_sample`` raises
+    ``SamplingRequiresPartitionFilterError`` (BigQuery's pre-CTAS refusal on a
+    >100M-row unpartitioned model) on an all-ingested batch. Every candidate has
+    a perfectly good full-scope form — its own unrewritten ``compiled_code``
+    against the source — so the engine falls back and each gets a REAL VERDICT,
+    NOT the blanket ``kept-without-evidence``.
+
+    Without this, ``prune-existing --scope=sample`` on exactly the tables
+    operators care most about would go from N real verdicts to ZERO pruning.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=SamplingRequiresPartitionFilterError(
+            table="fake_project.dataset.orders", num_rows=200_000_000
+        ),
+    )
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 5}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            _two_samplable_ingested_candidates(),
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 2
+    by_sql = {d.test.sql: d for d in result.decisions}  # type: ignore[union-attr]
+    # REAL verdicts against the source — never kept-without-evidence.
+    assert by_sql[_INGESTED_SOURCE_BODY].decision == "dropped"
+    assert by_sql[_INGESTED_SOURCE_BODY].reason == "always-passes"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].decision == "kept"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].reason == "kept"
+    for decision in result.decisions:
+        assert decision.reason != "kept-without-evidence"
+        # Dispatched verbatim against the source (no temp table to rewrite to).
+        assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+        assert "_sf_sample_" not in decision.compiled_sql
+
+    matching = [
+        record
+        for record in caplog.records
+        if record.name == "signalforge.prune.engine"
+        and "falling back to full-scope against source" in record.getMessage()
+    ]
+    assert len(matching) == 1
+    raw = matching[0].args[0] if isinstance(matching[0].args, tuple) else matching[0].args
+    assert isinstance(raw, str)
+    payload = json.loads(raw)
+    assert payload["fallback"] == "source"
+    # The adapter wraps the sizing refusal in ``MaterialisationFailedError``; the
+    # engine branches on ``WarehouseError``, so the class name is incidental —
+    # the CAUSE is what the operator needs, and it survives in ``error_message``.
+    assert payload["error_class"] == "MaterialisationFailedError"
+    assert "PartitionFilter" in payload["error_message"]
+    assert payload["candidate_count"] == 2
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_failure_preserves_pre_materialisation_bypass_reasons(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 + the QG fix — when materialisation fails and the batch falls back
+    to source, only the SAMPLABLE plans demote to ``materialisation-failed``. A
+    plan already refused at plan time (here a ``multi-relation`` body) KEEPS its
+    reason, so the aggregate INFO histogram reports the true cause instead of
+    over-writing every entry with ``materialisation-failed``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=SamplingRequiresPartitionFilterError(
+            table="fake_project.dataset.orders", num_rows=200_000_000
+        ),
+    )
+    # After the fallback, every ingested body runs verbatim against the source.
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1
+    # The two samplable bodies demote to ``materialisation-failed``; the
+    # multi-relation body KEEPS its plan-time reason (the bug was over-writing it).
+    assert payloads[0]["bypass_reasons"] == {"materialisation-failed": 2, "multi-relation": 1}
+    assert payloads[0]["sampled_count"] == 0
+    assert payloads[0]["bypassed_to_source_count"] == 3
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_failure_with_drafted_test_still_degrades(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-009's boundary — the SAME materialisation failure, but a DRAFTED
+    row-level test is in the batch. A drafted ``not_null`` genuinely needs the
+    sample and has no defined source fallback (running it full-scope would change
+    its cost profile without the operator asking), so the blanket
+    conservative-bias path stands unchanged: EVERY candidate routes to
+    ``kept-without-evidence`` and the original WARNING fires.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=SamplingRequiresPartitionFilterError(
+            table="fake_project.dataset.orders", num_rows=200_000_000
+        ),
+    )
+    # NO expect_query: the degraded path dispatches nothing.
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("WARNING", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 3
+    for decision in result.decisions:
+        assert decision.decision == "kept"
+        assert decision.reason == "kept-without-evidence"
+        assert decision.why.startswith("sample materialisation failed: ")
+
+    matching = [
+        record
+        for record in caplog.records
+        if record.name == "signalforge.prune.engine"
+        and "routing all tests to kept-without-evidence" in record.getMessage()
+    ]
+    assert len(matching) == 1
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_multi_relation_body_never_samples(tmp_path: Path) -> None:
+    """DEC-006 — an ingested body touching a SECOND physical relation is refused
+    by ``plan_relation_rewrite`` (``multi-relation``) and keeps bypassing to the
+    source, so ``materialise_sample`` is never called even alongside a samplable
+    sibling that alone cannot clear DEC-010's >= 2 threshold.
+
+    Sampling one leg of a join can produce a false pass → ``always-passes`` → a
+    real test is DROPPED. Enforced on the AST, never a ``\\bjoin\\b`` regex.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    join_body = (
+        "select o.id\nfrom `fake_project`.`dataset`.`orders` as o\n"
+        "join `fake_project`.`dataset`.`other_model` as x on x.id = o.id\n"
+        "where o.status = 'BAD'"
+    )
+    fake = FakeBigQueryClient(project="fake_project")
+    # NO expect_materialise_sample: both candidates bypass → no CTAS.
+    fake.expect_query(matching=r"other_model", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=join_body, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 2
+    for decision in result.decisions:
+        assert "_sf_sample_" not in decision.compiled_sql
+        assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+        assert decision.reason == "always-passes"
+    fake.assert_all_expectations_met()
+
+
+def test_test_requires_source_table_samplable_kwarg_is_pure_and_defaults_false() -> None:
+    """DEC-008 — ``samplable`` is a PURE keyword arg (default ``False``): the
+    helper never parses SQL, so its existing 2-positional-arg unit tests stay
+    valid and the sqlglot parse happens ONCE per body in
+    ``_plan_ingested_samples`` rather than five times at routing.
+
+    An ingested body bypasses to source unless the engine hands it
+    ``samplable=True``; a DRAFTED custom_sql never bypasses either way (gate on
+    ``from_manifest``, never ``type == "custom_sql"``).
+    """
+    from signalforge.prune.engine import _test_requires_source_table
+
+    ingested = CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True)
+    drafted = CandidateTestCustomSQL(sql="SELECT 1 FROM {{ this }} WHERE id IS NULL")
+
+    assert _test_requires_source_table(ingested, "materialised") is True
+    assert _test_requires_source_table(ingested, "materialised", samplable=False) is True
+    assert _test_requires_source_table(ingested, "materialised", samplable=True) is False
+    # scope=full has no temp table to bind: nothing bypasses, samplable or not.
+    assert _test_requires_source_table(ingested, None, samplable=True) is False
+    # A drafted body is never bypassed — and ``samplable`` cannot make it so.
+    assert _test_requires_source_table(drafted, "materialised", samplable=True) is False
+    # A metadata-aggregate variant ignores ``samplable`` entirely (DEC-003 kin).
+    assert (
+        _test_requires_source_table(
+            CandidateTestRowCountBetween(minimum=1, maximum=10), "materialised", samplable=True
+        )
+        is True
+    )
+
+
+# --- #268 DEC-011: bypassed_to_source is set at the decision site ------------
+
+
+def test_prune_tests_bypassed_to_source_distinguishes_sampled_from_bypassed(
+    tmp_path: Path,
+) -> None:
+    """#268 DEC-011 — THE audit-legibility pin. In ONE batch at
+    ``scope="sample"`` + ``materialised``, three destinations produce three
+    honest ``bypassed_to_source`` values:
+
+      * 2× samplable manifest-ingested custom_sql → rewritten onto the temp →
+        ``False`` (they really did run against the sample);
+      * 1× manifest-ingested COUNT-scalar → routed past the sample to the
+        SOURCE → ``True``;
+      * 1× drafted ``not_null`` → the temp via the #22 substitution → ``False``.
+
+    ``scope`` is copied from ``config.scope``, so EVERY one of these four
+    decisions records ``scope="sample"`` — including the one that full-scanned
+    production. Without this flag a reviewer cannot tell them apart, which cuts
+    against Architectural Commitment #5. A single-variant batch would only
+    exercise the ``all_bypass_to_source`` short-circuit; the mixed batch is what
+    pins the per-test ``per_test_table_ref`` arm (the #170 two-conditional rule).
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 2}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    assert result.total_tests == 4
+    by_sql = {
+        d.test.sql: d  # type: ignore[union-attr]
+        for d in result.decisions
+        if d.test.type == "custom_sql"
+    }
+    not_null = next(d for d in result.decisions if d.test.type == "not_null")
+
+    # Sampled → False. Cross-checked against the SQL that actually dispatched,
+    # so the flag cannot drift away from the routing it claims to describe.
+    for body in (_INGESTED_SOURCE_BODY, _INGESTED_SOURCE_BODY_2):
+        sampled = by_sql[body]
+        assert sampled.bypassed_to_source is False
+        assert _SAMPLE_TEMP_RE.search(sampled.compiled_sql) is not None
+    assert not_null.bypassed_to_source is False
+    assert "_SESSION._sf_sample_" in not_null.compiled_sql
+
+    # Bypassed → True, and the SQL confirms it hit the production relation.
+    scalar = by_sql[_INGESTED_COUNT_SCALAR_BODY]
+    assert scalar.bypassed_to_source is True
+    assert "`fake_project`.`dataset`.`orders`" in scalar.compiled_sql
+    assert "_sf_sample_" not in scalar.compiled_sql
+
+    # The lie the flag exists to expose: scope reads "sample" on all four.
+    assert {d.scope for d in result.decisions} == {"sample"}
+
+    # And it reaches the audit-of-record, not just the in-memory result.
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 4
+    assert sum(1 for row in audit_rows if row["bypassed_to_source"]) == 1
+    assert all(row["scope"] == "sample" for row in audit_rows)
+    assert all(row["audit_schema_version"] == 4 for row in audit_rows)
+
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_row_count_between_records_bypassed_to_source(tmp_path: Path) -> None:
+    """#268 DEC-011 also fixes the LATENT LIE the metadata-aggregate variants
+    have carried since #169: ``row_count_between`` always routes past the sample
+    to the source (a ``COUNT(*)`` over a hash-mod'd sample returns the sample
+    size, not the model's real row count) — yet it was recorded as
+    ``scope="sample"`` with nothing to say otherwise.
+
+    Under ``scope="sample"`` the decision now honestly reports
+    ``bypassed_to_source=True``.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    result = prune_tests(
+        _make_orders_model(),
+        adapter,
+        _candidates_with_one_row_count_test(minimum=100, maximum=10_000),
+        _make_manifest(_make_orders_model()),
+        config=PruneConfig(
+            scope="sample",
+            sample_size=100_000,
+            capture_failure_rows=0,
+            sample_strategy="materialised",
+        ),
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.test.type == "row_count_between"
+    assert decision.bypassed_to_source is True
+    assert decision.scope == "sample"  # the field that was, alone, misleading
+    assert "fake_project.dataset.orders" in decision.compiled_sql
+    assert _read_audit_lines(audit_path)[0]["bypassed_to_source"] is True
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_full_scope_never_reports_a_bypass(tmp_path: Path) -> None:
+    """Under ``scope="full"`` there is no sample to bypass, so
+    ``bypassed_to_source`` is ``False`` even for a metadata-aggregate variant
+    that would bypass under a sample scope.
+
+    Guards against the lazy implementation that keys the flag on the test's
+    VARIANT rather than on the routing the engine actually took.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    result = prune_tests(
+        _make_orders_model(),
+        adapter,
+        _candidates_with_one_row_count_test(minimum=100, maximum=10_000),
+        _make_manifest(_make_orders_model()),
+        config=PruneConfig(scope="full", capture_failure_rows=0),
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    decision = result.decisions[0]
+    assert decision.scope == "full"
+    assert decision.bypassed_to_source is False
+    assert _read_audit_lines(audit_path)[0]["bypassed_to_source"] is False
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #268 US-006 (DEC-014) — ingested-routing observability.
+#
+# The #154 INFO ("scope=sample requested; evaluating full-scope against source")
+# became a LIE for the samplable subset once #268 let an ingested body bind the
+# materialised temp table. It is replaced by ONE aggregate INFO per
+# ``prune_tests`` call carrying a ``{reason: count}`` bypass histogram, plus one
+# DEBUG breadcrumb per bypassed ingested candidate.
+#
+# Assertions decode the ``json.dumps`` payload (the DEC-017 lazy-format logger
+# gate forbids f-strings anywhere in a ``_LOGGER`` call's argument subtree) —
+# they pin the SIGNAL, never the prose.
+# ---------------------------------------------------------------------------
+
+# A body joining a SECOND physical relation. ``plan_relation_rewrite`` refuses it
+# on the AST (``"multi-relation"``, DEC-006): rewriting only the model's own
+# relation would silently join a SAMPLE against a FULL sibling.
+_INGESTED_MULTI_RELATION_BODY = (
+    "select o.id\n"
+    "from `fake_project`.`dataset`.`orders` as o\n"
+    "join `fake_project`.`dataset`.`customers` as c on o.customer_id = c.id\n"
+    "where c.id is null"
+)
+
+
+def test_prune_tests_ingested_routing_info_reports_sampled_bypassed_and_reasons(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 — the aggregate INFO on a REAL mixed batch: two samplable ingested
+    bodies (sampled onto the temp), one COUNT-scalar (``aggregate-scalar``), one
+    multi-relation body (``multi-relation``), plus a drafted ``not_null`` (not
+    ingested — it must not be counted at all).
+
+    Fires EXACTLY ONCE and reports ``sampled_count=2``,
+    ``bypassed_to_source_count=2`` and the ``{reason: count}`` histogram, so an
+    operator gets the SHAPE of the bypass without dropping to DEBUG. A per-batch
+    aggregate is the whole point: a single-candidate batch would pass a naive
+    implementation that emitted one INFO per test.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    # Distinct matchers → order-independent pairing. The samplable body and the
+    # count-scalar share the ``status = 'BAD'`` predicate, so the samplable one
+    # anchors on the REWRITTEN relation (the count-scalar keeps dbt's source).
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"where customer_id is null", returns=[{"failures": 1}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"IS NULL", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("INFO", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 5
+
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1, (
+        f"expected exactly ONE aggregate INFO per prune_tests call; got {len(payloads)}"
+    )
+    assert payloads[0] == {
+        "model_unique_id": model.unique_id,
+        "sample_strategy": "materialised",
+        # The drafted not_null is NOT an ingested candidate — 4, not 5.
+        "ingested_count": 4,
+        "sampled_count": 2,
+        "bypassed_to_source_count": 2,
+        "bypass_reasons": {"aggregate-scalar": 1, "multi-relation": 1},
+    }
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_bypass_debug_breadcrumb_per_non_sampled_candidate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-014 — one DEBUG breadcrumb per BYPASSED ingested candidate, carrying
+    its ``test_anchor`` + machine-readable ``reason``. The two SAMPLED bodies get
+    no breadcrumb (there is nothing to explain), and the drafted ``not_null``
+    gets none either.
+
+    DEBUG, not INFO: a wide model with 40 ingested tests would otherwise emit 40
+    INFO lines — the aggregate already carries the counts.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"where customer_id is null", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"sf_agg_value <> 0", returns=[{"failures": 0}])
+    fake.expect_query(
+        matching=r"join `fake_project`\.`dataset`\.`customers`", returns=[{"failures": 0}]
+    )
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_COUNT_SCALAR_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    breadcrumbs = _ingested_bypass_breadcrumbs(caplog)
+    # Two bypassed candidates → two breadcrumbs. The two sampled ones get none.
+    assert len(breadcrumbs) == 2
+    reasons = {str(crumb["reason"]) for crumb in breadcrumbs}
+    assert reasons == {"aggregate-scalar", "multi-relation"}
+    for crumb in breadcrumbs:
+        assert crumb["model_unique_id"] == model.unique_id
+        assert crumb["test_anchor"] == "model"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_routing_signals_silent_under_full_scope(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``scope="full"`` run has nothing to explain — every candidate runs
+    full-scope by design — so neither the aggregate INFO nor any breadcrumb
+    fires. Preserves the pre-#268 log-silence on the full path."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            _ingested_custom_sql_candidates(_INGESTED_SOURCE_BODY),
+            manifest,
+            config=PruneConfig(scope="full", capture_failure_rows=0),
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert _ingested_routing_payloads(caplog) == []
+    assert _ingested_bypass_breadcrumbs(caplog) == []
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_routing_signals_silent_without_ingested_candidates(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ``scope="sample"`` batch carrying NO manifest-ingested candidate stays
+    log-silent too — the aggregate reports on ingested routing, and there is
+    none. Guards against an implementation that fires an empty INFO on every
+    sample-mode run."""
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(matching=r"SELECT COUNT\(\*\)", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(
+            CandidateColumn(
+                name="id",
+                description="The order's primary key.",
+                tests=(CandidateTestNotNull(column="id"),),
+            ),
+        ),
+        tests=(),
+    )
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        prune_tests(
+            model,
+            adapter,
+            candidates,
+            manifest,
+            config=PruneConfig(
+                scope="sample",
+                sample_size=100_000,
+                capture_failure_rows=0,
+                sample_strategy="materialised",
+            ),
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert _ingested_routing_payloads(caplog) == []
+    assert _ingested_bypass_breadcrumbs(caplog) == []
+    fake.assert_all_expectations_met()
+
+
+# ---------------------------------------------------------------------------
+# #268 US-007 (DEC-004 / DEC-006 / DEC-016) — the remaining behavioural routing
+# pins.
+#
+# ``business-rule-tests.md``: "Pin the ENGINE-routing test, not just the compiler
+# snapshot." A snapshot certifies SQL shape; in #170 and #171 the bug lived in
+# the engine while the compiler snapshot stayed green. Every assertion below
+# keys on the DISPATCHED ``decision.compiled_sql`` and on the audit's
+# ``bypassed_to_source`` — the two surfaces that, together, say what the
+# warehouse actually ran.
+#
+# These are NECESSARY, NOT SUFFICIENT: a fake accepts SQL a live warehouse may
+# refuse (#226 found three such bugs). US-008's gated BigQuery live cert is the
+# merge gate (DEC-016).
+# ---------------------------------------------------------------------------
+
+# The relation appears TWICE. A rewrite that landed on only ONE occurrence would
+# join a SAMPLE against PRODUCTION and still parse cleanly — the sharpest hazard
+# in the epic, and one no syntax check can catch.
+_INGESTED_SELF_JOIN_BODY = (
+    "select a.id\n"
+    "from `fake_project`.`dataset`.`orders` as a\n"
+    "join `fake_project`.`dataset`.`orders` as b\n"
+    "  on a.customer_id = b.customer_id and a.id <> b.id\n"
+    "where a.status = 'BAD'"
+)
+
+
+def test_prune_tests_ingested_self_join_rewrites_both_occurrences_to_one_temp(
+    tmp_path: Path,
+) -> None:
+    """DEC-004 / DEC-006 — a self-join ingested body: BOTH occurrences of the
+    model relation are rewritten, to the SAME temp table, and the production
+    relation appears ZERO times in the dispatched SQL.
+
+    A self-join is a SINGLE distinct physical relation, so DEC-006's
+    single-relation rule admits it — but it yields TWO spans. A partial rewrite
+    (one span spliced, one missed) produces SQL that parses, executes, and
+    silently joins the sample against production: a plausible false pass →
+    ``always-passes`` → a real test is dropped. Only the DEC-004 AST
+    post-condition (``verify_relation_rewrite``: zero residual source tables) can
+    refuse it, and only an END-TO-END assertion on the dispatched bytes proves
+    the engine actually applied it.
+
+    The two temp references must be the same table: two different samples joined
+    together would be meaningless.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(matching=r"a\.id <> b\.id", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 4}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            # Two samplable bodies — the DEC-010 >= 2 threshold.
+            CandidateTestCustomSQL(sql=_INGESTED_SELF_JOIN_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    by_sql = {d.test.sql: d for d in result.decisions}  # type: ignore[union-attr]
+    self_join = by_sql[_INGESTED_SELF_JOIN_BODY]
+
+    temps = _SAMPLE_TEMP_RE.findall(self_join.compiled_sql)
+    assert len(temps) == 2  # BOTH spans spliced — a partial rewrite fails here.
+    assert len(set(temps)) == 1  # ...and onto the SAME sample, not two.
+    # Not one byte of the production relation survives.
+    assert "orders" not in self_join.compiled_sql
+    assert "`fake_project`.`dataset`" not in self_join.compiled_sql
+    # dbt's aliases and predicate survive the splice verbatim.
+    assert " as a\njoin " in self_join.compiled_sql
+    assert "on a.customer_id = b.customer_id and a.id <> b.id" in self_join.compiled_sql
+
+    assert self_join.bypassed_to_source is False
+    assert self_join.decision == "dropped"
+    assert self_join.reason == "always-passes"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].decision == "kept"
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_ingested_verify_failure_never_dispatches_unproven_sql(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """DEC-004 — when the AST post-condition REFUSES a rewrite, the engine must
+    never dispatch it. The candidate is demoted to a source bypass and still gets
+    a REAL verdict (its own unrewritten body, full-scope against the source) —
+    it is not degraded to ``kept-without-evidence``, and it is certainly not sent
+    to the warehouse unproven.
+
+    ``verify_relation_rewrite`` is stubbed to ``False`` — the only way to reach
+    this arm without shipping a deliberately broken splice. That is the point:
+    the branch exists precisely so that a FUTURE bug in ``plan_relation_rewrite``
+    or ``_build_ingested_rewrite`` (one that produced a mis-aimed or partial
+    rewrite) fails CLOSED. This test proves the fail-closed wiring is live, not
+    that today's splice is broken.
+
+    ``materialise_sample`` IS called (the batch cleared DEC-010 before the proof
+    ran), so this genuinely exercises the post-materialisation refusal — not the
+    ``all_bypass_to_source`` short-circuit.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    monkeypatch.setattr(engine_module, "verify_relation_rewrite", lambda *_a, **_k: False)
+
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 7}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    with caplog.at_level("DEBUG", logger="signalforge.prune.engine"):
+        result = prune_tests(
+            model,
+            adapter,
+            _two_samplable_ingested_candidates(),
+            manifest,
+            config=config,
+            audit_path=audit_path,
+            project_dir=tmp_path,
+        )
+
+    assert result.total_tests == 2
+    by_sql = {d.test.sql: d for d in result.decisions}  # type: ignore[union-attr]
+    for body in (_INGESTED_SOURCE_BODY, _INGESTED_SOURCE_BODY_2):
+        decision = by_sql[body]
+        # Dispatched VERBATIM against the source — never the temp table.
+        assert decision.compiled_sql == body
+        assert "_sf_sample_" not in decision.compiled_sql
+        assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+        # A real verdict, and the audit says honestly that it bypassed.
+        assert decision.reason != "kept-without-evidence"
+        assert decision.bypassed_to_source is True
+    assert by_sql[_INGESTED_SOURCE_BODY].reason == "always-passes"
+    assert by_sql[_INGESTED_SOURCE_BODY_2].reason == "kept"
+
+    # The observability agrees: nothing was sampled, both bypassed, and the
+    # reason names the post-condition refusal rather than a plan-time reject.
+    payloads = _ingested_routing_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["sampled_count"] == 0
+    assert payloads[0]["bypassed_to_source_count"] == 2
+    assert payloads[0]["bypass_reasons"] == {"verify-failed": 2}
+    assert [crumb["reason"] for crumb in _ingested_bypass_breadcrumbs(caplog)] == [
+        "verify-failed",
+        "verify-failed",
+    ]
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert all(row["bypassed_to_source"] is True for row in audit_rows)
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_bypassed_to_source_is_true_for_a_refused_ingested_body(
+    tmp_path: Path,
+) -> None:
+    """DEC-011's lie-detector, on the routing class the DEC-011 pin does not
+    reach: an ingested body REFUSED at plan time (``multi-relation``, DEC-006).
+
+    The existing ``bypassed_to_source`` pin covers sampled-ingested / count-scalar
+    / drafted-row-level / ``row_count_between`` / full-scope. A body refused by
+    ``plan_relation_rewrite`` is a distinct routing class, and it is the one an
+    implementation keyed on the test VARIANT (rather than on the routing the
+    engine actually took) would get wrong — a ``custom_sql`` that IS sampled and a
+    ``custom_sql`` that is NOT are the same variant.
+
+    The flag is cross-checked against the SQL that actually dispatched, so it
+    cannot itself lie.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    materialised_ref = _make_materialised_ref()
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(source_ref, sample_size=100_000, returns=materialised_ref)
+    # Two samplable siblings clear DEC-010, so the batch really does materialise
+    # a sample — the refused body bypasses it on its own merits, not because the
+    # whole batch short-circuited.
+    fake.expect_query(
+        matching=r"_sf_sample_[0-9a-f]{16}`\nwhere status = 'BAD'", returns=[{"failures": 0}]
+    )
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customers", returns=[{"failures": 0}])
+    fake.expect_abort_session(f"sess_{materialised_ref.name}")
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    candidates = CandidateSchema(
+        name="orders",
+        description="Order events.",
+        columns=(),
+        tests=(
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_SOURCE_BODY_2, from_manifest=True),
+            CandidateTestCustomSQL(sql=_INGESTED_MULTI_RELATION_BODY, from_manifest=True),
+        ),
+    )
+    config = PruneConfig(
+        scope="sample",
+        sample_size=100_000,
+        capture_failure_rows=0,
+        sample_strategy="materialised",
+    )
+
+    result = prune_tests(
+        model,
+        adapter,
+        candidates,
+        manifest,
+        config=config,
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    by_sql = {d.test.sql: d for d in result.decisions}  # type: ignore[union-attr]
+    refused = by_sql[_INGESTED_MULTI_RELATION_BODY]
+    assert refused.bypassed_to_source is True
+    assert "_sf_sample_" not in refused.compiled_sql
+    assert "`fake_project`.`dataset`.`orders`" in refused.compiled_sql
+
+    # ...while its two samplable siblings, SAME variant, report the opposite —
+    # so the flag is tracking the routing, not the type.
+    for body in (_INGESTED_SOURCE_BODY, _INGESTED_SOURCE_BODY_2):
+        sibling = by_sql[body]
+        assert sibling.bypassed_to_source is False
+        assert _SAMPLE_TEMP_RE.search(sibling.compiled_sql) is not None
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert sum(1 for row in audit_rows if row["bypassed_to_source"]) == 1
+    fake.assert_all_expectations_met()
+
+
+def test_prune_tests_materialisation_fallback_records_bypassed_to_source(
+    tmp_path: Path,
+) -> None:
+    """DEC-009 + DEC-011 — the LAST routing class: the materialisation-failure
+    fallback. Every candidate was planned as samplable, then the CTAS refused, so
+    each ran full-scope against the source instead.
+
+    ``scope`` still reads ``"sample"`` (it is copied from ``config.scope``), so
+    ``bypassed_to_source`` is the only field that tells a reviewer these verdicts
+    came from a FULL SCAN of production and not from the sample they asked for.
+    An implementation that computed the flag once, before the fallback re-routed
+    everything, would report ``False`` here — and the audit would claim a sample
+    that was never taken.
+    """
+    audit_path = tmp_path / "prune.jsonl"
+    fake = FakeBigQueryClient(project="fake_project")
+    source_ref = TableRef(project="fake_project", dataset="dataset", name="orders")
+    fake.expect_get_table(ref=source_ref, returns=FakeTable(num_rows=1_000_000))
+    fake.expect_materialise_sample(
+        source_ref,
+        sample_size=100_000,
+        returns=SamplingRequiresPartitionFilterError(
+            table="fake_project.dataset.orders", num_rows=200_000_000
+        ),
+    )
+    fake.expect_query(matching=r"status = 'BAD'", returns=[{"failures": 0}])
+    fake.expect_query(matching=r"customer_id is null", returns=[{"failures": 1}])
+    adapter = _make_adapter(fake)
+
+    model = _make_orders_model()
+    manifest = _make_manifest(model)
+    result = prune_tests(
+        model,
+        adapter,
+        _two_samplable_ingested_candidates(),
+        manifest,
+        config=PruneConfig(
+            scope="sample",
+            sample_size=100_000,
+            capture_failure_rows=0,
+            sample_strategy="materialised",
+        ),
+        audit_path=audit_path,
+        project_dir=tmp_path,
+    )
+
+    for decision in result.decisions:
+        assert decision.scope == "sample"  # the field that, alone, misleads
+        assert decision.bypassed_to_source is True
+        assert "`fake_project`.`dataset`.`orders`" in decision.compiled_sql
+        assert "_sf_sample_" not in decision.compiled_sql
+
+    audit_rows = _read_audit_lines(audit_path)
+    assert len(audit_rows) == 2
+    assert all(row["bypassed_to_source"] is True for row in audit_rows)
     fake.assert_all_expectations_met()

@@ -27,6 +27,14 @@ Public surface:
   keep the anomaly e2e self-documenting at the call site (the rule prose
   steers the drafter toward the structured anomaly variant rather than
   freeform ``custom_sql``).
+* :func:`inject_manifest_test_node` — injects a hand-crafted
+  ``resource_type == "test"`` node (with BigQuery-quoted ``compiled_code``)
+  into a copied fixture's ``target/manifest.json`` (issue #268 / US-008).
+  The repo carries no BigQuery-compiled ``compiled_code`` fixture — the
+  committed ``dbt_project_expectations`` manifest is **DuckDB**-compiled —
+  so the gated BigQuery live cert for manifest-ingested (``from_manifest``)
+  tests synthesises its nodes into the per-run ``tmp_path`` copy of the
+  Austin manifest rather than shipping a second live-warehouse dbt project.
 * :func:`apply_provider_override` — overlays per-test ``grade:`` block
   knobs (``provider`` / ``model`` / ``max_output_tokens`` /
   ``max_concurrent_calls``) onto a copied fixture's ``signalforge.yml``
@@ -123,6 +131,11 @@ def read_prune_decisions(project_dir: Path) -> tuple[PruneDecision, ...]:
                     sample_failures=event.sample_failures,
                     as_of=event.as_of,
                     stats=event.stats,
+                    # #268 US-005/DEC-011 — the sampled-vs-bypassed discriminator.
+                    # Omitting it here would silently default every read-back
+                    # decision to ``False`` and make a live
+                    # ``bypassed_to_source is False`` assertion VACUOUS.
+                    bypassed_to_source=event.bypassed_to_source,
                 )
             )
     return tuple(decisions)
@@ -246,6 +259,117 @@ def inject_model_anomaly_rules(
             loud rather than silently injecting nothing).
     """
     inject_model_business_rules(project_dir, model_unique_id, rules)
+
+
+def inject_manifest_test_node(
+    project_dir: Path,
+    *,
+    model_unique_id: str,
+    test_name: str,
+    compiled_code: str,
+    column_name: str | None = None,
+    macro_name: str = "expect_column_values_to_not_be_null",
+    macro_namespace: str | None = "dbt_expectations",
+) -> str:
+    """Inject a dbt-compiled ``resource_type == "test"`` node into a manifest.
+
+    Issue #268 / US-008 — the seam the **gated BigQuery live cert** for
+    manifest-ingested (``from_manifest=True``) tests is built on.
+
+    ``signalforge.ingest.read_manifest_tests`` reads a test node's
+    already-Jinja-resolved ``compiled_code`` off ``Manifest.tests`` and
+    turns each row-returning + deterministic body into a model-level
+    ``CandidateTestCustomSQL(from_manifest=True)``. Under
+    ``--scope=sample --sample-strategy materialised`` the prune engine
+    parses that body, locates the model's own relation on the sqlglot AST
+    and token-splices it to the ``_SESSION._sf_sample_<run_id>`` temp
+    table.
+
+    The repo has **no BigQuery-compiled ``compiled_code`` fixture** — the
+    committed ``tests/fixtures/dbt_project_expectations`` manifest is
+    DuckDB-compiled (``"dev"."main"."orders"``), and the BigQuery quoting
+    exercised in the unit suite is hand-modelled. So the live cert
+    synthesises BigQuery-quoted nodes (``\\`proj\\`.\\`ds\\`.\\`tbl\\```) into
+    the per-run ``tmp_path`` copy of the Austin manifest, rather than
+    shipping a second live-warehouse dbt project just to run
+    ``dbt compile`` against ``bigquery-public-data``.
+
+    The node carries the full field set the read surface consumes
+    (``signalforge.manifest.GenericTest`` + the ``associate_test_model``
+    ladder): ``attached_node`` (authoritative on manifest v10+, which the
+    Austin fixture is), plus ``depends_on.nodes`` / ``file_key_name`` /
+    ``test_metadata.kwargs.model`` so the v9 fallback ladder would also
+    resolve it. ``test_metadata.name`` / ``.namespace`` drive the macro
+    label that rides on the candidate's synthesized ``rationale`` (#154
+    DEC-015) into the diff ``why``.
+
+    Args:
+        project_dir: a copied project root (use
+            :func:`copy_fixture_to_tmp` first — NEVER call against a
+            committed fixture; mutates ``target/manifest.json`` in place).
+        model_unique_id: the dbt ``unique_id`` of the model the test is
+            attached to (e.g.
+            ``"model.signalforge_test_austin.stg_bikeshare_trips"``).
+        test_name: a short, unique node name. Also forms the injected
+            node's ``unique_id`` (``test.<package>.<test_name>``).
+        compiled_code: the dbt-compiled test body. For a BigQuery live
+            run this MUST carry the model's relation in dbt-BigQuery
+            quoting (three backtick-quoted components) — that is exactly
+            the shape the AST relation-rewriter must match.
+        column_name: optional ``column_name`` on the node (cosmetic for
+            the prune path; carried through to the skip/label surfaces).
+        macro_name: ``test_metadata.name`` — the macro identity.
+        macro_namespace: ``test_metadata.namespace`` (``None`` for a
+            core / in-house generic test).
+
+    Returns:
+        The injected node's ``unique_id``.
+
+    Raises:
+        KeyError: if ``model_unique_id`` is not present in the manifest's
+            ``nodes`` map (a typo surfaces loud rather than silently
+            injecting an unassociated test node).
+    """
+    manifest_path = project_dir / "target" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    model_node = manifest["nodes"][model_unique_id]
+
+    package_name = model_node["package_name"]
+    model_name = model_node["name"]
+    unique_id = f"test.{package_name}.{test_name}"
+
+    manifest["nodes"][unique_id] = {
+        "database": model_node.get("database"),
+        "schema": f"{model_node.get('schema')}_dbt_test__audit",
+        "name": test_name,
+        "resource_type": "test",
+        "package_name": package_name,
+        "path": f"{test_name}.sql",
+        "original_file_path": f"models/staging/{model_name}.yml",
+        "unique_id": unique_id,
+        "fqn": [package_name, test_name],
+        "alias": test_name,
+        "column_name": column_name,
+        # Association ladder (signalforge.manifest.associate_test_model):
+        # ``attached_node`` is authoritative on manifest v10+ (the Austin
+        # fixture is v12); the other two make the v9 fallback resolve too.
+        "attached_node": model_unique_id,
+        "file_key_name": f"models.{model_name}",
+        "depends_on": {"macros": [], "nodes": [model_unique_id]},
+        "test_metadata": {
+            "name": macro_name,
+            "namespace": macro_namespace,
+            "kwargs": {
+                "column_name": column_name,
+                "model": f"{{{{ get_where_subquery(ref('{model_name}')) }}}}",
+            },
+        },
+        "compiled": True,
+        "compiled_code": compiled_code,
+    }
+
+    manifest_path.write_text(json.dumps(manifest))
+    return unique_id
 
 
 def apply_provider_override(
