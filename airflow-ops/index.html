@@ -1,0 +1,3438 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/airflow-ops/">
+      
+      
+        <link rel="prev" href="../llm-providers-ops/">
+      
+      
+        <link rel="next" href="../cost-estimate-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Airflow Integration - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#airflow-integration" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Airflow Integration
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../drafter-catalogue/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Test Catalogue
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Airflow Integration
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../drafter-catalogue/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Catalogue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airflow Integration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airflow Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install-airflow-alongside-signalforge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Airflow alongside SignalForge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-example-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The example DAG
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#result-task-state-xcom-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result → task-state + XCom contract
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Result → task-state + XCom contract">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#exit-taskoutcome-airflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit → TaskOutcome → Airflow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged keys on the diff's flagged count, not the exit code
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#invocation-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Invocation modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#xcom-payload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        XCom payload
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transport-dry-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transport + --dry-run
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-select-batch-behaviour-the-raw-seam-vs-the-operator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --select batch behaviour: the raw seam vs the operator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgegenerateoperator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignalForgeGenerateOperator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SignalForgeGenerateOperator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#params-cli-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Params → CLI flags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#writefalse-is-dry-run-the-safe-scheduled-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        write=False is --dry-run (the safe scheduled default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged keys on the diff's flagged count, not the exit code
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#invocation-modes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Invocation modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cost-time-guardrails-via-signalforgeyml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost / time guardrails via signalforge.yml
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-select-batch-per-model-xcom-aggregate-task-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --select batch: per-model XCom + aggregate task-state
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#concurrent-project_dir-sidecar-caveat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrent project_dir sidecar caveat
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgepruneexistingoperator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignalForgePruneExistingOperator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SignalForgePruneExistingOperator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-only-no-llm-by-design-dec-001" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only / no-LLM by design (DEC-001)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schema-is-a-required-param-dec-002" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        schema is a required param (DEC-002)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#single-model-only-no-select-batch-dec-003" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Single-model only — no --select batch (DEC-003)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-is-inert-without-grading-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged is inert without grading (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#params-cli-flags_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Params → CLI flags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tests_dir-singular-custom_sql-test-ingestion-dec-006" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        tests_dir — singular custom_sql test ingestion (DEC-006)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#drift-signal-rot-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drift / signal-rot detection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Drift / signal-rot detection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#form-1-ergonomic-drift-folded-into-the-generate-task" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Form 1 — ergonomic: drift folded into the generate task
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#form-2-branchable-generate-persists-a-dedicated-operator-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Form 2 — branchable: generate persists, a dedicated operator gates
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detect_drift_against-drift_history_dir-the-date-stamped-history-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        detect_drift_against + drift_history_dir — the date-stamped history pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_drift-fail-skip-succeed-most-severe-wins-with-on_flagged" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_drift (fail / skip / succeed) — most-severe-wins with on_flagged
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#degrade-never-fail-dec-013" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Degrade, never fail (DEC-013)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-as-of-reproducibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --as-of reproducibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#drift-xcom-payload-driftreportto_xcom" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drift XCom payload (DriftReport.to_xcom)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worked-example-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example DAG
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#airflow-native-credentials-signalforgehook-signalforge_conn_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Airflow-native credentials: SignalForgeHook + signalforge_conn_id
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Airflow-native credentials: SignalForgeHook + signalforge_conn_id">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#setting-up-the-connection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setting up the Connection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#connection-extra-schema-validated-extraforbid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Connection extra schema (validated extra="forbid")
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-key-password-primary-variable-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API key: password primary, Variable fallback
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#provider-allowlist-closed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provider allowlist (closed)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence-explicit-param-connection-extra-default-dec-012" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence: explicit param &gt; Connection extra &gt; default (DEC-012)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#generate-vs-pruneexisting-credentials-dec-016" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generate vs PruneExisting credentials (DEC-016)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secrets-hygiene-the-four-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets hygiene — the four surfaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#in-process-concurrency-caveat-dec-015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-process concurrency caveat (DEC-015)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling-for-drift-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling for drift detection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#managed-airflow-runtimes-astronomer-mwaa-composer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Managed Airflow runtimes (Astronomer / MWAA / Composer)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#install-airflow-alongside-signalforge" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Install Airflow alongside SignalForge
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-example-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The example DAG
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#result-task-state-xcom-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Result → task-state + XCom contract
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Result → task-state + XCom contract">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#exit-taskoutcome-airflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit → TaskOutcome → Airflow
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged keys on the diff's flagged count, not the exit code
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#invocation-modes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Invocation modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#xcom-payload" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        XCom payload
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#transport-dry-run" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Transport + --dry-run
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-select-batch-behaviour-the-raw-seam-vs-the-operator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --select batch behaviour: the raw seam vs the operator
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgegenerateoperator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignalForgeGenerateOperator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SignalForgeGenerateOperator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#params-cli-flags" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Params → CLI flags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#writefalse-is-dry-run-the-safe-scheduled-default" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        write=False is --dry-run (the safe scheduled default)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged keys on the diff's flagged count, not the exit code
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#invocation-modes_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Invocation modes
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#cost-time-guardrails-via-signalforgeyml" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Cost / time guardrails via signalforge.yml
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-select-batch-per-model-xcom-aggregate-task-state" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --select batch: per-model XCom + aggregate task-state
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#concurrent-project_dir-sidecar-caveat" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Concurrent project_dir sidecar caveat
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#signalforgepruneexistingoperator" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        SignalForgePruneExistingOperator
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="SignalForgePruneExistingOperator">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#minimal-usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Minimal usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#read-only-no-llm-by-design-dec-001" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Read-only / no-LLM by design (DEC-001)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#schema-is-a-required-param-dec-002" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        schema is a required param (DEC-002)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#single-model-only-no-select-batch-dec-003" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Single-model only — no --select batch (DEC-003)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_flagged-is-inert-without-grading-dec-004" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_flagged is inert without grading (DEC-004)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#params-cli-flags_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Params → CLI flags
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#tests_dir-singular-custom_sql-test-ingestion-dec-006" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        tests_dir — singular custom_sql test ingestion (DEC-006)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#drift-signal-rot-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drift / signal-rot detection
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Drift / signal-rot detection">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#form-1-ergonomic-drift-folded-into-the-generate-task" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Form 1 — ergonomic: drift folded into the generate task
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#form-2-branchable-generate-persists-a-dedicated-operator-gates" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Form 2 — branchable: generate persists, a dedicated operator gates
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#detect_drift_against-drift_history_dir-the-date-stamped-history-pattern" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        detect_drift_against + drift_history_dir — the date-stamped history pattern
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#on_drift-fail-skip-succeed-most-severe-wins-with-on_flagged" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        on_drift (fail / skip / succeed) — most-severe-wins with on_flagged
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#degrade-never-fail-dec-013" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Degrade, never fail (DEC-013)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#-as-of-reproducibility" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --as-of reproducibility
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#drift-xcom-payload-driftreportto_xcom" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Drift XCom payload (DriftReport.to_xcom)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#worked-example-dag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Worked example DAG
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#airflow-native-credentials-signalforgehook-signalforge_conn_id" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Airflow-native credentials: SignalForgeHook + signalforge_conn_id
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Airflow-native credentials: SignalForgeHook + signalforge_conn_id">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#setting-up-the-connection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Setting up the Connection
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#connection-extra-schema-validated-extraforbid" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Connection extra schema (validated extra="forbid")
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#api-key-password-primary-variable-fallback" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        API key: password primary, Variable fallback
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#provider-allowlist-closed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Provider allowlist (closed)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#precedence-explicit-param-connection-extra-default-dec-012" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Precedence: explicit param &gt; Connection extra &gt; default (DEC-012)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#generate-vs-pruneexisting-credentials-dec-016" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Generate vs PruneExisting credentials (DEC-016)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#secrets-hygiene-the-four-surfaces" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets hygiene — the four surfaces
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#in-process-concurrency-caveat-dec-015" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        In-process concurrency caveat (DEC-015)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#usage_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Usage
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling-for-drift-detection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling for drift detection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#managed-airflow-runtimes-astronomer-mwaa-composer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Managed Airflow runtimes (Astronomer / MWAA / Composer)
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#testing" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Testing
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#caveats" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Caveats
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="airflow-integration">Airflow integration</h1>
+<p>Run SignalForge's <strong>draft → prune → grade → diff</strong> pipeline as a scheduled Airflow
+DAG — turning the CLI from an ad-hoc tool into a <strong>scheduled schema-drift / signal-rot
+monitor</strong>. Consistent with Architectural Commitment #4 (OSS-first, Core-friendly): an
+Airflow DAG runs against any dbt-core project, no dbt Cloud dependency.</p>
+<blockquote>
+<p><strong>Status (v0.7).</strong> Epic #228 landed in full: three operators plus a credential hook,
+all reusing the one result→task-state + XCom contract documented here.
+The <strong><code>SignalForgeGenerateOperator</code></strong> (issue #232 —
+<a href="#signalforgegenerateoperator">section</a>) wraps <code>signalforge generate</code> (single model or
+a <code>--select</code> batch); the <strong><code>SignalForgePruneExistingOperator</code></strong> (issue #233 —
+<a href="#signalforgepruneexistingoperator">section</a>) wraps the no-LLM, read-only
+<code>signalforge prune-existing</code> (ingest → prune → diff) as a zero-credential signal-rot
+monitor; the <strong><code>SignalForgeDriftOperator</code></strong> (issue #235 —
+<a href="#drift--signal-rot-detection">section</a>) gates a DAG on run-over-run drift by comparing
+two persisted <code>diff.json</code> sidecars (no CLI call, no credentials); and the
+<strong><code>SignalForgeHook</code></strong> (issue #234 —
+<a href="#airflow-native-credentials-signalforgehook--signalforge_conn_id">section</a>) maps an
+Airflow Connection/Variable to the dbt <code>profiles.yml</code> + LLM API key.
+The <strong>example DAG</strong> that drives the pipeline through the <code>signalforge.airflow</code> helpers
+(<code>run_signalforge</code> + <code>decide_task_outcome</code> + <code>raise_for_outcome</code>) from a
+<code>PythonOperator</code> still ships as a from-scratch reference; the operators collapse both
+halves of that pattern into one <code>execute()</code>.</p>
+</blockquote>
+<h2 id="install-airflow-alongside-signalforge">Install Airflow alongside SignalForge</h2>
+<p>Airflow is <strong>not</strong> a normal dependency — it is heavy and version-pinned via a
+per-<code>(airflow, python)</code> constraints file, so it installs into its own environment, not
+the core <code>pip install signalforge-dbt</code>. Certified floor: <strong><code>apache-airflow 2.10.4</code> on
+Python 3.11</strong> (<code>&gt;=2.8,&lt;3</code>). Full rationale + the CI shape: <code>docs/research/airflow-test-environment.md</code>.</p>
+<div class="highlight"><pre><span></span><code><span class="nv">AIRFLOW_VERSION</span><span class="o">=</span><span class="m">2</span>.10.4
+<span class="nv">PYTHON_VERSION</span><span class="o">=</span><span class="m">3</span>.11
+<span class="nv">CONSTRAINTS</span><span class="o">=</span><span class="s2">&quot;https://raw.githubusercontent.com/apache/airflow/constraints-</span><span class="si">${</span><span class="nv">AIRFLOW_VERSION</span><span class="si">}</span><span class="s2">/constraints-</span><span class="si">${</span><span class="nv">PYTHON_VERSION</span><span class="si">}</span><span class="s2">.txt&quot;</span>
+
+uv<span class="w"> </span>venv<span class="w"> </span>.venv-airflow<span class="w"> </span>--python<span class="w"> </span><span class="si">${</span><span class="nv">PYTHON_VERSION</span><span class="si">}</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>.venv-airflow<span class="w"> </span><span class="s2">&quot;apache-airflow==</span><span class="si">${</span><span class="nv">AIRFLOW_VERSION</span><span class="si">}</span><span class="s2">&quot;</span><span class="w"> </span>--constraint<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">CONSTRAINTS</span><span class="si">}</span><span class="s2">&quot;</span>
+<span class="c1"># SignalForge editable/installed. The --constraint is load-bearing: without it,</span>
+<span class="c1"># google-cloud-bigquery drags protobuf 4-&gt;5 over Airflow&#39;s pins and risks breaking it.</span>
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>.venv-airflow<span class="w"> </span>signalforge-dbt<span class="w"> </span>--constraint<span class="w"> </span><span class="s2">&quot;</span><span class="si">${</span><span class="nv">CONSTRAINTS</span><span class="si">}</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>The <code>signalforge</code> CLI must be importable/on PATH in the <strong>same environment</strong> as the
+Airflow worker — the example DAG resolves it next to the worker's Python interpreter.</p>
+<h2 id="the-example-dag">The example DAG</h2>
+<p><code>examples/airflow/signalforge_generate_dag.py</code> (<code>dag_id: signalforge_generate</code>) has two
+tasks:</p>
+<ol>
+<li><strong><code>generate</code></strong> — calls <code>run_signalforge(["generate", &lt;model&gt;, "--dry-run",
+   "--format", "json"], project_dir=&lt;dir&gt;)</code> and pushes <code>result.to_xcom()</code> (tier counts</li>
+<li>sidecar paths) to XCom. It deliberately does <strong>not</strong> raise on the pipeline outcome
+   so the counts always land in XCom even when the run is later failed / skipped.</li>
+<li><strong><code>gate</code></strong> — pulls the summary from XCom, rebuilds the <code>SignalForgeRunResult</code>, and
+   acts on it via <code>decide_task_outcome(result, on_flagged=...)</code> →
+   <code>raise_for_outcome(outcome, message=...)</code>. This is the single "act on the graded
+   diff" decision point; the <code>on_flagged</code> policy (<code>fail</code> default) decides what a flagged
+   run does.</li>
+</ol>
+<p>Splitting run from decide keeps the contract visible; the roadmap
+<code>SignalForgeGenerateOperator</code> collapses both halves into one <code>execute()</code>.</p>
+<p>Copy it into your <code>AIRFLOW__CORE__DAGS_FOLDER</code>, or point the DAGs folder at
+<code>examples/airflow/</code>.</p>
+<h2 id="configuration">Configuration</h2>
+<p>Set via <strong>Airflow Variables</strong> (Admin → Variables, or <code>airflow variables set</code>), with
+environment-variable overrides for CI / local runs:</p>
+<table>
+<thead>
+<tr>
+<th>Airflow Variable</th>
+<th>Env override</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>signalforge_project_dir</code></td>
+<td><code>SF_PROJECT_DIR</code></td>
+<td>dbt project root (must contain <code>target/manifest.json</code>) — required</td>
+</tr>
+<tr>
+<td><code>signalforge_model</code></td>
+<td><code>SF_MODEL</code></td>
+<td>model <strong>file-path or unique_id</strong> (a bare name fails) — required</td>
+</tr>
+<tr>
+<td><code>signalforge_on_flagged</code></td>
+<td><code>SF_ON_FLAGGED</code></td>
+<td>how to treat a flagged (exit-0) run: <code>fail</code> (default) / <code>skip</code> / <code>succeed</code></td>
+</tr>
+</tbody>
+</table>
+<p>The worker also needs the pipeline's own credentials: <code>ANTHROPIC_API_KEY</code> for the
+drafter/grader and the warehouse env (for BigQuery: <code>GOOGLE_CLOUD_PROJECT</code> + Application
+Default Credentials). Provide these via the Airflow worker's environment or a secrets
+backend — <strong>never</strong> log them.</p>
+<h2 id="result-task-state-xcom-contract">Result → task-state + XCom contract</h2>
+<p>The integration formalises one contract — reused verbatim by the example DAG today
+and the dedicated operators on the roadmap — turning a SignalForge run into (1) an
+Airflow task state and (2) an XCom payload. Two Airflow-free pieces in
+<code>signalforge.airflow</code> carry it (eagerly importable — no Airflow install needed), plus
+a thin Airflow-side translator:</p>
+<ul>
+<li><code>run_signalforge(argv, *, project_dir, ...) -&gt; SignalForgeRunResult</code> — runs the
+  pipeline and parses its output into a frozen result. Airflow-free.</li>
+<li><code>decide_task_outcome(result, *, on_flagged="fail") -&gt; TaskOutcome</code> — the <strong>pure</strong>
+  decision table (the result core). Airflow-free.</li>
+<li><code>raise_for_outcome(outcome, *, message)</code> — the thin Airflow-side translator that
+  turns a <code>TaskOutcome</code> into the matching Airflow exception. It lives in
+  <code>signalforge.airflow._airflow_compat</code> (not the package top, and not eagerly
+  re-exported); the <code>from airflow.exceptions import ...</code> is lazy in its body, so the
+  symbol is importable without Airflow, but <em>calling</em> it needs the <code>[airflow]</code> extra.</li>
+</ul>
+<h3 id="exit-taskoutcome-airflow">Exit → TaskOutcome → Airflow</h3>
+<p><code>TaskOutcome</code> is a <strong>separate axis layered on the four-tier CLI exit codes — NOT a
+fifth exit tier</strong> (don't collapse exit tiers 2 &amp; 3, and don't invent a fifth). The
+exit code is the <em>input</em>; the <code>TaskOutcome</code> is the <em>output</em>:</p>
+<table>
+<thead>
+<tr>
+<th>Exit</th>
+<th>+ condition</th>
+<th><code>TaskOutcome</code></th>
+<th>Airflow signal</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td><code>flagged == 0</code></td>
+<td><code>SUCCESS</code></td>
+<td>task succeeds</td>
+</tr>
+<tr>
+<td>0</td>
+<td><code>flagged &gt; 0</code>, <code>on_flagged=fail</code></td>
+<td><code>FAIL_NO_RETRY</code></td>
+<td><code>AirflowFailException</code> (no retry)</td>
+</tr>
+<tr>
+<td>0</td>
+<td><code>flagged &gt; 0</code>, <code>on_flagged=skip</code></td>
+<td><code>SKIP</code></td>
+<td><code>AirflowSkipException</code></td>
+</tr>
+<tr>
+<td>0</td>
+<td><code>flagged &gt; 0</code>, <code>on_flagged=succeed</code></td>
+<td><code>SUCCESS</code></td>
+<td>task succeeds</td>
+</tr>
+<tr>
+<td>1</td>
+<td>load / parse failure</td>
+<td><code>FAIL_NO_RETRY</code></td>
+<td><code>AirflowFailException</code> (no retry)</td>
+</tr>
+<tr>
+<td>2</td>
+<td>input / invariant failure</td>
+<td><code>FAIL_NO_RETRY</code></td>
+<td><code>AirflowFailException</code> (no retry)</td>
+</tr>
+<tr>
+<td>3</td>
+<td>external (warehouse / LLM)</td>
+<td><code>FAIL_RETRYABLE</code></td>
+<td><code>AirflowException</code> (Airflow retry policy applies)</td>
+</tr>
+</tbody>
+</table>
+<p>The <code>AirflowFailException</code> vs <code>AirflowException</code> split is load-bearing: tiers 1/2 are
+deterministic (retrying can't help, so retries are bypassed), while tier 3
+(auth / rate-limit / warehouse / API blips) is worth retrying under the task's
+<code>retries</code> / <code>retry_delay</code>.</p>
+<h3 id="on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code"><code>on_flagged</code> keys on the diff's flagged count, not the exit code</h3>
+<p>A flagged run <strong>exits 0 by default</strong> — SignalForge runs with
+<code>grade.fail_on_below_threshold=false</code>, so a below-threshold artifact is surfaced via
+the diff JSON's <code>flagged_count &gt; 0</code> (<code>SignalForgeRunResult.below_threshold</code>), <strong>not</strong> via
+exit 2. Under the documented default <code>--dry-run</code> path there is no sidecar file (it is
+suppressed); the count is read off the rendered diff on stdout (see <em>Transport +
+<code>--dry-run</code></em> below). Tier 2 stays purely <em>hard</em> input errors (<code>ModelNotFoundError</code>,
+anchor-contract failures); conflating it with "reviewable flagged" would mis-route hard
+errors to the review branch. So <code>on_flagged</code> only applies to a <em>successful</em> (exit-0) run:</p>
+<ul>
+<li><code>fail</code> (default — signal over volume): a flagged run is a hard task failure so a
+  reviewer sees it.</li>
+<li><code>skip</code>: raises <code>AirflowSkipException</code>. Route a downstream review task off it (a
+  trigger-rule / <code>BranchPythonOperator</code> path).</li>
+<li><code>succeed</code>: pass through — report-only.</li>
+</ul>
+<h3 id="invocation-modes">Invocation modes</h3>
+<p><code>run_signalforge(..., invocation=...)</code>:</p>
+<ul>
+<li><code>in_process</code> (default) — calls <code>signalforge.cli.main(argv)</code> directly: no subprocess
+  overhead, and the CLI's panic-path + four-tier exit-code mapping come for free. It
+  snapshots and restores <code>sys.excepthook</code> and the env keys the CLI mutates
+  (<code>NO_COLOR</code> / <code>FORCE_COLOR</code> / <code>DBT_PROFILES_DIR</code>) so a long-lived worker stays clean
+  across tasks.</li>
+<li><code>subprocess</code> — runs <code>[sys.executable, "-m", "signalforge", *argv]</code> (list form, never
+  <code>shell=True</code>) in a fresh interpreter for full isolation (worker memory hygiene /
+  conflicting deps). <code>timeout_seconds</code> bounds it.</li>
+</ul>
+<blockquote>
+<p><strong>Concurrency caveat.</strong> In-process capture uses <code>contextlib.redirect_stdout</code>, which
+is <strong>process-global</strong> — two concurrent in-process invocations in the <em>same</em> worker
+would clobber each other's captured output. Use <code>invocation="subprocess"</code> when tasks
+may run concurrently in one worker process.</p>
+</blockquote>
+<h3 id="xcom-payload">XCom payload</h3>
+<p><code>SignalForgeRunResult.to_xcom()</code> returns <strong>counts + sidecar paths only — no secrets</strong>
+(audits carry only <code>blake2b-8</code> hashes; the model SQL stays in the sidecar <em>file</em>,
+surfaced by path):</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;exit_code&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;model_unique_ids&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;model.my_project.stg_orders&quot;</span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;kept&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;kept_uncertain&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;dropped&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">11</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;flagged&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;mean_grade&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">0.91</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;below_threshold&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;diff_sidecar_path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/dbt/.signalforge/diff.json&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;grade_sidecar_path&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;/path/to/dbt/.signalforge/grade.json&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;duration_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">312.0</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Downstream tasks consume it via <code>ti.xcom_pull(task_ids="generate")</code>. Pushing the <em>full</em>
+sidecar contents is an opt-in the operator child may add (size-warned — XCom backends
+cap payload size; the default keeps the payload small).</p>
+<h3 id="transport-dry-run">Transport + <code>--dry-run</code></h3>
+<p>The diff counts are read off <strong>stdout</strong> (<code>--format json</code>, injected when absent), not
+the sidecar file — because <code>--dry-run</code> (the read-only scheduled drift mode) suppresses
+both sidecar files. The JSON <em>shape</em> (<code>DiffReport.model_dump_json</code>) is the contract,
+byte-identical whether read from the file or stdout. <code>mean_grade</code> is read from
+<code>grade.json</code> when present; it is <code>None</code> under <code>--dry-run</code> / <code>--no-grade</code> (no grade
+sidecar), and <code>diff_sidecar_path</code> / <code>grade_sidecar_path</code> are <code>None</code> when the files
+don't exist.</p>
+<h3 id="-select-batch-behaviour-the-raw-seam-vs-the-operator"><code>--select</code> batch behaviour: the raw seam vs the operator</h3>
+<p>This is a property of the <strong>raw <code>run_signalforge</code> seam</strong>, not the operator. A single
+<code>run_signalforge</code> call over a <code>--select</code> batch lets the CLI's own batch driver render
+every matched model, but the sidecars are last-writer-wins — so the parsed result
+reflects only the <strong>last</strong> model's diff JSON, and <code>model_unique_ids</code> contains at most
+that last model's id (NOT the full match set). If you call the raw seam directly and
+need per-model counts, drive one <code>run_signalforge</code> per model yourself.</p>
+<p>The <strong><code>SignalForgeGenerateOperator</code> overcomes this</strong>: it resolves the <code>--select</code>
+expression itself and loops <code>run_signalforge</code> once per matched model, so its XCom
+carries accurate per-model counts plus a rollup aggregate
+(see the <strong><code>--select</code> batch: per-model XCom + aggregate task-state</strong> section below).
+Prefer the operator over the raw seam for any batch.</p>
+<h3 id="usage">Usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">decide_task_outcome</span><span class="p">,</span> <span class="n">run_signalforge</span>
+<span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow._airflow_compat</span><span class="w"> </span><span class="kn">import</span> <span class="n">raise_for_outcome</span>
+
+<span class="n">result</span> <span class="o">=</span> <span class="n">run_signalforge</span><span class="p">(</span>
+    <span class="p">[</span><span class="s2">&quot;generate&quot;</span><span class="p">,</span> <span class="s2">&quot;models/staging/stg_orders.sql&quot;</span><span class="p">,</span> <span class="s2">&quot;--dry-run&quot;</span><span class="p">],</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/path/to/dbt&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+<span class="n">outcome</span> <span class="o">=</span> <span class="n">decide_task_outcome</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">on_flagged</span><span class="o">=</span><span class="s2">&quot;fail&quot;</span><span class="p">)</span>
+<span class="n">raise_for_outcome</span><span class="p">(</span><span class="n">outcome</span><span class="p">,</span> <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;signalforge exit=</span><span class="si">{</span><span class="n">result</span><span class="o">.</span><span class="n">exit_code</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+</code></pre></div>
+<h2 id="signalforgegenerateoperator">SignalForgeGenerateOperator</h2>
+<p><code>SignalForgeGenerateOperator</code> runs <code>signalforge generate</code> (a single model or a
+<code>--select</code> batch) as <strong>one Airflow task</strong>. It wraps the Airflow-free
+<code>run_signalforge</code> seam: maps its params to a <code>generate</code> argv, runs the pipeline, maps
+the result to a <code>TaskOutcome</code> via the pure <code>decide_task_outcome</code>, and raises the
+matching Airflow signal — returning the run's XCom payload (counts + sidecar paths).
+It is the recommended surface over the hand-wired <code>PythonOperator</code> example DAG.</p>
+<p>The operator ships behind the <code>[airflow]</code> extra. Importing it without Airflow
+installed is fine (attribute access stays Airflow-free); <strong>constructing</strong> it without
+Airflow raises <code>ModuleNotFoundError</code> pointing at <code>pip install 'signalforge-dbt[airflow]'</code>.</p>
+<h3 id="minimal-usage">Minimal usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">SignalForgeGenerateOperator</span>
+
+<span class="n">monitor</span> <span class="o">=</span> <span class="n">SignalForgeGenerateOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;signalforge_nightly&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/dbt/my_project&quot;</span><span class="p">,</span>
+    <span class="n">select</span><span class="o">=</span><span class="s2">&quot;tag:nightly&quot;</span><span class="p">,</span>   <span class="c1"># or model=&quot;models/staging/stg_orders.sql&quot;</span>
+    <span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>            <span class="c1"># dry-run: the safe scheduled default (no file writes)</span>
+    <span class="n">on_flagged</span><span class="o">=</span><span class="s2">&quot;fail&quot;</span><span class="p">,</span>      <span class="c1"># a below-threshold (flagged) run fails the task</span>
+<span class="p">)</span>
+</code></pre></div>
+<h3 id="params-cli-flags">Params → CLI flags</h3>
+<p>Every <code>__init__</code> kwarg and the <code>signalforge generate</code> flag it maps to. <code>--format json</code>
+and <code>--project-dir</code> are always injected by the runner.</p>
+<table>
+<thead>
+<tr>
+<th>Operator param</th>
+<th>Maps to</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_id</code></td>
+<td>—</td>
+<td>standard Airflow; required</td>
+</tr>
+<tr>
+<td><code>project_dir</code></td>
+<td><code>--project-dir &lt;dir&gt;</code></td>
+<td>dbt project root (must contain <code>target/manifest.json</code>); required. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>positional <code>&lt;model&gt;</code></td>
+<td>model <strong>file-path or unique_id</strong> (a bare name fails); mutex with <code>select</code>. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>select</code></td>
+<td><code>--select &lt;expr&gt;</code></td>
+<td>dbt-style selector (<code>tag:…</code>, <code>path:…</code>, comma-union); mutex with <code>model</code>. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>profiles_dir</code></td>
+<td><code>--profiles-dir &lt;dir&gt;</code></td>
+<td>overrides <code>DBT_PROFILES_DIR</code>; omitted when unset. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>write</code></td>
+<td><code>--write</code> (True) / <code>--dry-run</code> (False)</td>
+<td>default <code>False</code>. See the <strong><code>write=False</code></strong> section below</td>
+</tr>
+<tr>
+<td><code>no_grade</code></td>
+<td><code>--no-grade</code></td>
+<td>default <code>False</code>; skips the grade stage (<code>mean_grade</code> → <code>None</code>)</td>
+</tr>
+<tr>
+<td><code>cache_scope</code></td>
+<td><code>--cache-scope &lt;scope&gt;</code></td>
+<td><code>per-model</code> / <code>project</code>; omitted when unset (auto-promoted on batches — see below)</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td><code>--as-of &lt;YYYY-MM-DD&gt;</code></td>
+<td>reproducibility anchor for time-bound tests; <code>{{ ds }}</code> is a natural source. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>on_flagged</code></td>
+<td>— (decision layer)</td>
+<td><code>fail</code> (default) / <code>skip</code> / <code>succeed</code>; see the <strong><code>on_flagged</code></strong> section below</td>
+</tr>
+<tr>
+<td><code>invocation</code></td>
+<td>— (run mode)</td>
+<td><code>in_process</code> (default) / <code>subprocess</code>; see the <strong>Invocation modes</strong> section below</td>
+</tr>
+<tr>
+<td><code>signalforge_conn_id</code></td>
+<td>— (hook)</td>
+<td>optional Airflow Connection id; resolves warehouse auth + LLM credentials via <code>SignalForgeHook</code> (see the <strong>Airflow-native credentials</strong> section). <code>None</code> (default) = ambient-env mode, byte-identical to prior behaviour. <strong>Not</strong> a <code>template_field</code> (secrets hygiene).</td>
+</tr>
+<tr>
+<td><code>**kwargs</code></td>
+<td>—</td>
+<td>passed to <code>BaseOperator</code> (<code>retries</code>, <code>retry_delay</code>, <code>depends_on_past</code>, …)</td>
+</tr>
+</tbody>
+</table>
+<p>Exactly one of <code>model</code> or <code>select</code> must be set (a validation error fires at DAG-parse
+time otherwise). The five <code>template_fields</code> are Jinja-rendered from the task context
+before <code>execute</code>, so <code>as_of="{{ ds }}"</code>, <code>model="{{ params.model }}"</code>, etc. work.
+<code>execute</code> re-validates the rendered values before building any argv (DEC-005).</p>
+<p>The operator does <strong>not</strong> take a <code>config_overrides</code> param in v0.7 (DEC-002) — see the
+<strong>Cost / time guardrails via <code>signalforge.yml</code></strong> section below.</p>
+<h3 id="writefalse-is-dry-run-the-safe-scheduled-default"><code>write=False</code> is <code>--dry-run</code> (the safe scheduled default)</h3>
+<p><code>write=False</code> (the default) passes <code>--dry-run</code>: the run writes <strong>nothing</strong> — no
+<code>schema.yml</code>, no proposed <code>.sql</code>, no <code>.signalforge/diff.json</code> or <code>grade.json</code> sidecars
+(DEC-003). XCom counts are built from the diff JSON on <strong>stdout</strong>, and the
+<code>diff_sidecar_path</code> / <code>grade_sidecar_path</code> XCom fields are <code>None</code>. This is exactly what
+a scheduled drift monitor wants: observe the tier-count delta run-over-run without
+mutating the repo.</p>
+<p><code>write=True</code> passes <code>--write</code>: SignalForge writes the proposed <code>schema.yml</code> (kept tests)
+plus any <code>custom_sql</code> <code>.sql</code> files, and the sidecar files are written so the path fields
+populate.</p>
+<h3 id="on_flagged-keys-on-the-diffs-flagged-count-not-the-exit-code_1"><code>on_flagged</code> keys on the diff's flagged count, not the exit code</h3>
+<p>A flagged run <strong>exits 0</strong> <em>under the default</em> <code>grade.fail_on_below_threshold=false</code>, so a
+below-threshold artifact surfaces via the diff's <code>flagged_count &gt; 0</code>, <strong>not</strong> via exit 2
+(DEC-008). <code>on_flagged</code> only applies to such a <em>successful</em> (exit-0) run. (If you set
+<code>grade.fail_on_below_threshold=true</code> in <code>signalforge.yml</code>, a below-threshold run instead
+exits <strong>2</strong> → <code>FAIL_NO_RETRY</code> via the exit-code mapping, bypassing the <code>on_flagged</code>
+branch entirely — so leave it at the default if you want <code>skip</code>/<code>succeed</code> to take effect.)</p>
+<ul>
+<li><code>fail</code> (default — signal over volume): a flagged run is a hard task failure
+  (<code>AirflowFailException</code>, no retry) so a reviewer sees it.</li>
+<li><code>skip</code>: raises <code>AirflowSkipException</code> — route a downstream review task off it (a
+  trigger-rule / <code>BranchPythonOperator</code> path).</li>
+<li><code>succeed</code>: pass through — report-only.</li>
+</ul>
+<p>Hard input errors (tier 2: <code>ModelNotFoundError</code>, anchor-contract failures) stay hard
+task failures regardless of <code>on_flagged</code> — they never route to the review branch.</p>
+<h3 id="invocation-modes_1">Invocation modes</h3>
+<p><code>invocation</code> selects how the operator runs the CLI:</p>
+<ul>
+<li><code>in_process</code> (default) — calls <code>signalforge.cli.main(argv)</code> directly: no subprocess
+  overhead, and the CLI's panic-path + four-tier exit-code mapping come for free. It
+  snapshots and restores <code>sys.excepthook</code>, the env keys the CLI mutates
+  (<code>NO_COLOR</code> / <code>FORCE_COLOR</code> / <code>DBT_PROFILES_DIR</code>), and the root logger so a long-lived
+  worker stays clean across tasks.</li>
+<li><code>subprocess</code> — runs <code>[sys.executable, "-m", "signalforge", *argv]</code> (list form, never
+  <code>shell=True</code>) in a fresh interpreter.</li>
+</ul>
+<blockquote>
+<p><strong>Concurrency caveat (DEC-004).</strong> In-process capture uses
+<code>contextlib.redirect_stdout</code>, which is <strong>process-global</strong> — two concurrent
+<code>in_process</code> tasks in the <em>same</em> worker would clobber each other's captured output.
+Use <code>invocation="subprocess"</code> for parallel / high-concurrency workers; it is the clean
+per-task isolation choice.</p>
+</blockquote>
+<h3 id="cost-time-guardrails-via-signalforgeyml">Cost / time guardrails via <code>signalforge.yml</code></h3>
+<p>The operator takes <strong>no</strong> cost/time-ceiling params in v0.7 (DEC-002). Bound scheduled
+spend through the project's committed <code>signalforge.yml grade:</code> block instead — every run
+the operator launches reads it:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">grade</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">max_grade_cost_usd</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5.00</span><span class="w">     </span><span class="c1"># degrade-not-fail once the run&#39;s grade spend hits the cap</span>
+<span class="w">  </span><span class="nt">max_grade_calls</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">200</span><span class="w">         </span><span class="c1"># cap on judge calls</span>
+<span class="w">  </span><span class="nt">max_grade_tokens</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">500000</span><span class="w">     </span><span class="c1"># cap on judge tokens</span>
+<span class="w">  </span><span class="nt">total_budget_seconds</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">600</span><span class="w">    </span><span class="c1"># absolute wall-clock cap on the grade stage</span>
+</code></pre></div>
+<p>These are the documented way to cap a scheduled DAG's Anthropic spend. (Warehouse spend
+is bounded separately by the prune engine's <code>maximum_bytes_billed</code>, and <code>write=False</code>
+keeps the run read-only.)</p>
+<h3 id="-select-batch-per-model-xcom-aggregate-task-state"><code>--select</code> batch: per-model XCom + aggregate task-state</h3>
+<p>For a <code>--select</code> batch the operator resolves the selector to its model unique_ids itself
+and loops <code>run_signalforge</code> once per model (DEC-001), overcoming the raw seam's
+last-writer-wins sidecar limitation (see the
+<strong><code>--select</code> batch behaviour: the raw seam vs the operator</strong> section above).
+When <code>cache_scope</code> is unset and ≥2 models match, the operator forces
+<code>--cache-scope project</code> on each looped call (DEC-007) so Anthropic's server-side prompt
+cache amortises the byte-identical project prefix across the siblings instead of paying
+cache-creation per model.</p>
+<p>The XCom payload for a batch is <code>{"models": [&lt;per-model to_xcom() dict&gt;…],
+"aggregate": &lt;rollup to_xcom() dict&gt;}</code> (DEC-010). The <strong>single</strong> Airflow task state is
+driven by the aggregate (DEC-008): <code>exit_code = max(per-model exit codes)</code> over the
+four-tier severity ordering (mirrors the CLI's <code>_run_batch.total_exit_code</code>); the tier
+counts (<code>kept</code> / <code>kept_uncertain</code> / <code>dropped</code> / <code>flagged</code>) are element-wise sums;
+<code>mean_grade</code> is the mean of the non-<code>None</code> per-model means; the aggregate's sidecar paths
+are <code>None</code> (a batch has no single sidecar). A batch mixing a tier-2 and a tier-3 model
+maps to the retryable tier-3 outcome — the tier-2 model re-fails until the task's retry
+budget exhausts (acceptable at single-task granularity).</p>
+<p>A single-model run returns the bare <code>result.to_xcom()</code> dict (no <code>models</code>/<code>aggregate</code>
+wrapper).</p>
+<h3 id="concurrent-project_dir-sidecar-caveat">Concurrent <code>project_dir</code> sidecar caveat</h3>
+<p>Two runs against the <strong>same</strong> <code>project_dir</code> collide on the <code>.signalforge/*.json</code>
+sidecars (<code>O_TRUNC</code>, last-writer-wins). Under the default <code>write=False</code> (dry-run) this is
+a non-issue — no sidecars are written, so there is nothing to collide. With <code>write=True</code>,
+give each concurrent run its own <code>project_dir</code> (or accept last-writer-wins). This is
+distinct from the in-process stdout-capture concurrency caveat above (that one bites even
+under dry-run; use <code>subprocess</code> for it).</p>
+<h2 id="signalforgepruneexistingoperator">SignalForgePruneExistingOperator</h2>
+<p><code>SignalForgePruneExistingOperator</code> runs <code>signalforge prune-existing</code> (ingest → prune →
+diff, <strong>no LLM call</strong>) as <strong>one Airflow task</strong>. It is the cheapest, fastest,
+zero-credential SignalForge integration: a <strong>signal-rot monitor</strong> that grades the dbt
+tests a team <em>already has</em> (a hand-authored or generated <code>schema.yml</code>) against live
+warehouse data on a schedule, flagging the tests that <em>used</em> to catch failing rows but
+now always-pass. Because it makes no Anthropic call, the worker needs <strong>no
+<code>ANTHROPIC_API_KEY</code></strong> — only the warehouse credentials.</p>
+<p>Like the generate operator it ships behind the <code>[airflow]</code> extra. Importing it without
+Airflow installed is fine (attribute access stays Airflow-free); <strong>constructing</strong> it
+without Airflow raises <code>ModuleNotFoundError</code> pointing at
+<code>pip install 'signalforge-dbt[airflow]'</code>.</p>
+<h3 id="minimal-usage_1">Minimal usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">SignalForgePruneExistingOperator</span>
+
+<span class="n">monitor</span> <span class="o">=</span> <span class="n">SignalForgePruneExistingOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;signalforge_signal_rot&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/dbt/my_project&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;models/staging/stg_orders.sql&quot;</span><span class="p">,</span>      <span class="c1"># file-path or unique_id (a bare name fails)</span>
+    <span class="n">schema</span><span class="o">=</span><span class="s2">&quot;models/staging/schema.yml&quot;</span><span class="p">,</span>         <span class="c1"># the hand-authored schema.yml to prune</span>
+<span class="p">)</span>
+</code></pre></div>
+<h3 id="read-only-no-llm-by-design-dec-001">Read-only / no-LLM by design (DEC-001)</h3>
+<p>The operator deliberately exposes <strong>no <code>write</code> param and no <code>mode</code> param</strong>:</p>
+<ul>
+<li><code>prune-existing</code> has no <code>--write</code> — the <code>--schema</code> source is a hand-authored file and
+  overwriting it would be surprising. The operator is <strong>always read-only</strong>: it passes
+  <code>--dry-run</code> on every run, so nothing is written to the dbt project (both sidecars
+  suppressed) and the diff is read off <strong>stdout</strong> (<code>--format json</code>) — the #231 JSON
+  transport, not the suppressed sidecar file.</li>
+<li><code>--mode</code> (a <code>SafetyPolicy</code> knob) is <strong>inert</strong> on this path — <code>prune_tests</code> never reads
+  the safety policy, and the LLM payload <code>--mode</code> shapes is never built. The warehouse
+  knobs that <em>do</em> matter are <code>scope</code> (<code>--scope</code>) and <code>sample_strategy</code>
+  (<code>--sample-strategy</code>).</li>
+</ul>
+<p>No Anthropic credential is required or read — this path never touches an LLM credential
+at all (no <code>conn_id</code>-style LLM connection param exists on the operator).</p>
+<h3 id="schema-is-a-required-param-dec-002"><code>schema</code> is a required param (DEC-002)</h3>
+<p><code>prune-existing</code> cannot run without <code>--schema &lt;path&gt;</code> (the hand-authored <code>schema.yml</code>
+whose tests are pruned). <code>schema</code> is therefore a <strong>required</strong> operator param; an
+empty / <code>None</code> / blank value raises <code>AirflowConfigError</code> (CLI tier 2) at DAG-parse /
+instantiation time, before any <code>run_signalforge</code> call — alongside the empty-<code>project_dir</code>,
+empty-<code>model</code>, and leading-dash argv-injection guards.</p>
+<h3 id="single-model-only-no-select-batch-dec-003">Single-model only — no <code>--select</code> batch (DEC-003)</h3>
+<p><code>prune-existing</code> takes a single positional <code>&lt;model&gt;</code> and has <strong>no <code>--select</code></strong>. The
+operator therefore drops the entire batch apparatus the generate operator carries: no
+selector resolution, no per-model loop, no aggregation, no <code>--cache-scope</code>. One
+<code>run_signalforge</code> call, one <code>SignalForgeRunResult</code>, one <code>to_xcom()</code> payload.</p>
+<h3 id="on_flagged-is-inert-without-grading-dec-004"><code>on_flagged</code> is inert without grading (DEC-004)</h3>
+<p><code>prune-existing</code> calls <code>render_diff(grading_report=None)</code> — there is <strong>no grading</strong>, so
+there is never a <code>flagged</code> tier. Entries are only kept / kept-uncertain / dropped,
+<code>result.flagged</code> is always <code>0</code>, and <code>result.below_threshold</code> is always <code>False</code>. A clean
+(exit-0) run therefore always yields the <code>SUCCESS</code> <code>TaskOutcome</code> <strong>regardless of
+<code>on_flagged</code></strong>.</p>
+<p><code>on_flagged</code> is retained (and validated against <code>{fail, skip, succeed}</code>) for symmetry
+with the sibling operators — and so a future grade pass layered on top would Just Work —
+but <strong>it has no effect today</strong>. The exit→<code>TaskOutcome</code>→Airflow table for tiers 1/2/3 (a
+hard load/parse/input/external error) still applies exactly as documented above: tier 1
+or 2 → <code>FAIL_NO_RETRY</code>, tier 3 (warehouse/auth) → <code>FAIL_RETRYABLE</code>.</p>
+<h3 id="params-cli-flags_1">Params → CLI flags</h3>
+<p>Every <code>__init__</code> kwarg and the <code>signalforge prune-existing</code> flag it maps to.
+<code>--format json</code> and <code>--dry-run</code> are <strong>always</strong> injected (DEC-005). There is no <code>write</code>,
+<code>mode</code>, <code>select</code>, <code>no_grade</code>, or <code>cache_scope</code> param.</p>
+<table>
+<thead>
+<tr>
+<th>Operator param</th>
+<th>Maps to</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>task_id</code></td>
+<td>—</td>
+<td>standard Airflow; required</td>
+</tr>
+<tr>
+<td><code>project_dir</code></td>
+<td><code>--project-dir &lt;dir&gt;</code></td>
+<td>dbt project root (must contain <code>target/manifest.json</code>); required. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>model</code></td>
+<td>positional <code>&lt;model&gt;</code></td>
+<td>model <strong>file-path or unique_id</strong> (a bare name fails); required. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>schema</code></td>
+<td><code>--schema &lt;path&gt;</code></td>
+<td>the hand-authored <code>schema.yml</code> to prune; <strong>required</strong> (DEC-002). <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>profiles_dir</code></td>
+<td><code>--profiles-dir &lt;dir&gt;</code></td>
+<td>overrides <code>DBT_PROFILES_DIR</code>; omitted when unset. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>manifest</code></td>
+<td><code>--manifest &lt;path&gt;</code></td>
+<td>explicit <code>manifest.json</code> override; omitted when unset</td>
+</tr>
+<tr>
+<td><code>scope</code></td>
+<td><code>--scope &lt;scope&gt;</code></td>
+<td>prune scope (<code>sample</code> / <code>full</code>); omitted when unset</td>
+</tr>
+<tr>
+<td><code>sample_strategy</code></td>
+<td><code>--sample-strategy &lt;strategy&gt;</code></td>
+<td><code>materialised</code> / <code>oneshot</code>; omitted when unset</td>
+</tr>
+<tr>
+<td><code>as_of</code></td>
+<td><code>--as-of &lt;YYYY-MM-DD&gt;</code></td>
+<td>reproducibility anchor for time-bound tests; <code>{{ ds }}</code> is a natural source. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>tests_dir</code></td>
+<td><code>--tests-dir &lt;dir&gt;</code></td>
+<td>directory of singular-test <code>tests/*.sql</code> files to ingest too (DEC-006); omitted when unset. <strong><code>template_fields</code></strong></td>
+</tr>
+<tr>
+<td><code>on_flagged</code></td>
+<td>— (decision layer)</td>
+<td><code>fail</code> (default) / <code>skip</code> / <code>succeed</code>; <strong>inert without grading</strong> (DEC-004)</td>
+</tr>
+<tr>
+<td><code>invocation</code></td>
+<td>— (run mode)</td>
+<td><code>in_process</code> (default) / <code>subprocess</code>; see the <strong>Invocation modes</strong> section above</td>
+</tr>
+<tr>
+<td><code>signalforge_conn_id</code></td>
+<td>— (hook)</td>
+<td>optional Airflow Connection id; resolves <strong><code>profiles_dir</code> only</strong> via <code>SignalForgeHook</code> (read-only — no LLM key; see the <strong>Airflow-native credentials</strong> section). <code>None</code> (default) = ambient-env mode, byte-identical to prior behaviour. <strong>Not</strong> a <code>template_field</code> (secrets hygiene).</td>
+</tr>
+<tr>
+<td><code>**kwargs</code></td>
+<td>—</td>
+<td>passed to <code>BaseOperator</code> (<code>retries</code>, <code>retry_delay</code>, <code>depends_on_past</code>, …)</td>
+</tr>
+</tbody>
+</table>
+<p>The six <code>template_fields</code> (<code>project_dir</code>, <code>model</code>, <code>schema</code>, <code>profiles_dir</code>, <code>as_of</code>,
+<code>tests_dir</code>) are Jinja-rendered from the task context before <code>execute</code>, so
+<code>model="{{ params.model }}"</code>, <code>schema="{{ params.schema }}"</code>, <code>as_of="{{ ds }}"</code>, etc.
+work. <code>execute</code> re-validates the rendered values before building any argv.</p>
+<h3 id="tests_dir-singular-custom_sql-test-ingestion-dec-006"><code>tests_dir</code> — singular <code>custom_sql</code> test ingestion (DEC-006)</h3>
+<p>When set, <code>tests_dir</code> passes <code>--tests-dir &lt;dir&gt;</code> so <code>prune-existing</code> also ingests the
+singular-test (<code>tests/*.sql</code>) files in that directory — the <code>custom_sql</code> business-rule
+test surface — alongside the <code>schema.yml</code> tests, pruning them in one run. Omitted when
+unset (the CLI defaults to <code>&lt;project&gt;/tests</code>).</p>
+<h2 id="drift-signal-rot-detection">Drift / signal-rot detection</h2>
+<p>SignalForge's prune step drops a test that <em>always-passes</em> on warehouse samples
+(Architectural Commitment #1 — an always-pass test is noise). <strong>Signal rot</strong> is the
+run-over-run version of that: a test that <em>used to</em> catch failing rows (a <code>kept</code> /
+<code>kept-uncertain</code> / <code>flagged</code> tier) but <strong>now always-passes</strong> (<code>dropped</code> with
+<code>drop_reason == "always-passes"</code>). The data changed underneath a test that silently
+stopped doing anything — a schema-drift alarm worth paging on. A run-over-run <strong>grade
+regression</strong> (the mean rubric score fell beyond a threshold) is the second alarming
+signal.</p>
+<p>Drift detection is <strong>single-model</strong> in v0.7, opt-in, and comes in <strong>two operator
+surfaces</strong> — both backed by the same pure, Airflow-free comparison core
+(<code>signalforge.airflow.compute_drift</code>).</p>
+<h3 id="form-1-ergonomic-drift-folded-into-the-generate-task">Form 1 — ergonomic: drift folded into the generate task</h3>
+<p>The <code>SignalForgeGenerateOperator</code> detects drift <em>as part of</em> its run when
+<code>detect_drift_against</code> is set: it parses the current diff off its own stdout, loads the
+prior run's <code>diff.json</code> from the templated path, computes a <code>DriftReport</code>, optionally
+persists this run's <code>diff.json</code> (+ <code>grade.json</code> sibling) for the next run
+(<code>drift_history_dir</code>), and folds the drift verdict into the task state via <code>on_drift</code>.
+One task does run + compare + persist + decide. The drift summary rides on the task's
+XCom under the <code>"drift"</code> key.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">SignalForgeGenerateOperator</span>
+
+<span class="n">monitor</span> <span class="o">=</span> <span class="n">SignalForgeGenerateOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;drift_monitor&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/dbt/my_project&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;models/staging/stg_orders.sql&quot;</span><span class="p">,</span>
+    <span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>                       <span class="c1"># read-only scheduled default</span>
+    <span class="n">as_of</span><span class="o">=</span><span class="s2">&quot;{{ ds }}&quot;</span><span class="p">,</span>                  <span class="c1"># reproducibility anchor</span>
+    <span class="c1"># Compare against yesterday&#39;s persisted diff; persist today&#39;s for tomorrow.</span>
+    <span class="n">detect_drift_against</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json&quot;</span><span class="p">,</span>
+    <span class="n">drift_history_dir</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ ds }}&quot;</span><span class="p">,</span>
+    <span class="n">on_drift</span><span class="o">=</span><span class="s2">&quot;fail&quot;</span><span class="p">,</span>                   <span class="c1"># alarming drift → hard, no-retry failure</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>When <code>detect_drift_against</code> is unset the operator behaves byte-identically to the
+pre-drift generate operator — no drift key, no behaviour change.</p>
+<h3 id="form-2-branchable-generate-persists-a-dedicated-operator-gates">Form 2 — branchable: generate persists, a dedicated operator gates</h3>
+<p>When you want the run and the alarm to be <strong>separate tasks</strong> — the generate should
+always succeed-and-persist, and a downstream task is the pageable gate you branch /
+alert on independently — use the dedicated <code>SignalForgeDriftOperator</code>. It runs <strong>no
+<code>signalforge</code> CLI invocation</strong>: it reads two persisted <code>diff.json</code> sidecars
+(yesterday + today, plus auto-resolved <code>grade.json</code> siblings) off disk, computes the
+<code>DriftReport</code>, and drives its single task state off the drift verdict. Because it
+touches no LLM and no warehouse, the worker needs <strong>no credentials</strong> for this task.</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="n">SignalForgeDriftOperator</span><span class="p">,</span> <span class="n">SignalForgeGenerateOperator</span>
+
+<span class="n">generate</span> <span class="o">=</span> <span class="n">SignalForgeGenerateOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;generate&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/dbt/my_project&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;models/staging/stg_orders.sql&quot;</span><span class="p">,</span>
+    <span class="n">detect_drift_against</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json&quot;</span><span class="p">,</span>
+    <span class="n">drift_history_dir</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ ds }}&quot;</span><span class="p">,</span>  <span class="c1"># persists today&#39;s diff.json</span>
+    <span class="n">on_drift</span><span class="o">=</span><span class="s2">&quot;succeed&quot;</span><span class="p">,</span>                <span class="c1"># record-only: the generate task never fails on drift</span>
+<span class="p">)</span>
+
+<span class="n">drift_check</span> <span class="o">=</span> <span class="n">SignalForgeDriftOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;drift_check&quot;</span><span class="p">,</span>
+    <span class="n">previous_diff_path</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ macros.ds_add(ds, -1) }}/diff.json&quot;</span><span class="p">,</span>
+    <span class="n">current_diff_path</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/sf_history/{{ ds }}/diff.json&quot;</span><span class="p">,</span>
+    <span class="n">on_drift</span><span class="o">=</span><span class="s2">&quot;fail&quot;</span><span class="p">,</span>                   <span class="c1"># the pageable gate</span>
+<span class="p">)</span>
+
+<span class="n">generate</span> <span class="o">&gt;&gt;</span> <span class="n">drift_check</span>
+</code></pre></div>
+<p><code>previous_diff_path</code> and <code>current_diff_path</code> are <strong>required</strong> params (validated at
+DAG-parse). The dedicated operator's XCom <strong>is</strong> the drift payload (not nested under a
+<code>"drift"</code> key — that nesting is the generate operator's shape).</p>
+<h3 id="detect_drift_against-drift_history_dir-the-date-stamped-history-pattern"><code>detect_drift_against</code> + <code>drift_history_dir</code> — the date-stamped history pattern</h3>
+<p>Each run persists a date-stamped <code>diff.json</code> (<code>drift_history_dir="…/{{ ds }}"</code>); the
+next run compares against the prior date's copy (<code>detect_drift_against="…/{{ macros.ds_add(ds, -1) }}/diff.json"</code>).
+Both params are in <code>template_fields</code>, so the logical date stamps the path. Mount the
+history base on durable storage so a run can find the prior run's sidecar. Persistence
+reuses the fail-closed <code>write_sidecar</code> writer (no new writer); the <code>grade.json</code> sibling
+is copied best-effort. Persistence requires <strong>both</strong> <code>detect_drift_against</code> (which enables
+the drift step) <strong>and</strong> <code>drift_history_dir</code> (the destination): with <code>drift_history_dir</code>
+unset the run still computes drift but writes nothing.</p>
+<h3 id="on_drift-fail-skip-succeed-most-severe-wins-with-on_flagged"><code>on_drift</code> (fail / skip / succeed) — most-severe-wins with <code>on_flagged</code></h3>
+<p><code>on_drift</code> is the run-over-run analogue of <code>on_flagged</code>:</p>
+<ul>
+<li><code>fail</code> (default) — an alarming drift is a hard, <strong>no-retry</strong> <code>AirflowFailException</code>.
+  Signal rot is deterministic, so retrying cannot un-rot it; it is a reviewer signal,
+  not a transient.</li>
+<li><code>skip</code> — <code>AirflowSkipException</code> (mark the task skipped — route to a review branch).</li>
+<li><code>succeed</code> — pass through (record-only; the drift still rides on XCom).</li>
+</ul>
+<p>On the generate operator the flagged-axis (<code>on_flagged</code>) and the drift-axis (<code>on_drift</code>)
+<strong>combine most-severe-wins</strong> on an exit-0 run (<code>FAIL_NO_RETRY &gt; SKIP &gt; SUCCESS</code>). A hard
+load/parse/input/external error (exit 1/2/3) short-circuits both axes per the
+<a href="#exit--taskoutcome--airflow">Exit → TaskOutcome → Airflow</a> table.</p>
+<h3 id="degrade-never-fail-dec-013">Degrade, never fail (DEC-013)</h3>
+<p>The comparison is fail-soft, so a drift monitor never breaks the DAG over its own
+bookkeeping:</p>
+<ul>
+<li><strong>Missing prior <code>diff.json</code></strong> (the first run), <strong>or a corrupt / unreadable / oversize</strong>
+  prior sidecar → a non-alarming <strong>baseline</strong> (<code>baseline=True</code>); the task SUCCEEDs and
+  persists today's diff for next time. The prior loader (<code>load_diff_report</code>) is fail-soft
+  and returns <code>None</code> for absent <em>and</em> malformed input alike, so both collapse to the same
+  baseline — a corrupt prior is <strong>not</strong> distinguished from a missing one.</li>
+<li><strong><code>model_unique_id</code> mismatch</strong> between the two diffs → a non-alarming <strong>degraded</strong> report
+  with <code>degrade_reason</code> set; the task SUCCEEDs. (This is the one degrade path that sets
+  <code>degrade_reason</code>; it fires inside <code>compute_drift</code>, after both diffs load.)</li>
+<li><strong>Missing <code>grade.json</code></strong> (<code>--no-grade</code>) → tier-transition drift is still computed; the
+  grade-regression axis is simply empty.</li>
+<li><strong>Unparseable current diff</strong> (on the generate path) → drift degrades to <em>no verdict</em>
+  (no <code>"drift"</code> key); the generate run's own exit-code / flagged verdict still governs.</li>
+</ul>
+<p>A degraded or baseline report is <strong>never</strong> <code>alarming</code>, so <code>on_drift</code> cannot trip on it.</p>
+<p>On the <strong>dedicated</strong> operator only, a missing / unreadable <strong>current</strong> diff is the one
+hard error: it reads the current diff from a path (it runs no CLI), so an absent current
+file means the operator is misconfigured → <code>AirflowConfigError</code> (CLI tier 2), not a
+baseline.</p>
+<h3 id="-as-of-reproducibility"><code>--as-of</code> reproducibility</h3>
+<p><code>as_of="{{ ds }}"</code> flows the logical date into <code>--as-of</code> so time-bound primitives (e.g.
+<code>row_count_anomaly_by_period</code>) are pinned to the scheduled date — see
+<code>docs/prune-ops.md</code>. The same two sidecars + same <code>as_of</code> reproduce a byte-identical
+<code>DriftReport</code> (the report carries the two input <code>blake2b-8</code> hashes).</p>
+<h3 id="drift-xcom-payload-driftreportto_xcom">Drift XCom payload (<code>DriftReport.to_xcom</code>)</h3>
+<p>The drift summary is JSON-serialisable, carries <strong>no bulk sidecar text and no secrets</strong>,
+and on the generate operator is nested under <code>"drift"</code> (the dedicated operator returns it
+directly). Shape:</p>
+<ul>
+<li><code>schema_version</code>, <code>model_unique_id</code>, <code>as_of</code> (iso or <code>null</code>), <code>baseline</code>, <code>alarming</code>,
+  <code>degrade_reason</code>, <code>grade_regression_threshold</code>, <code>previous_diff_hash</code>, <code>current_diff_hash</code>;</li>
+<li><code>counts</code> — per-category counts: <code>newly_always_passes</code> (the signal-rot tally),
+  <code>newly_dropped</code>, <code>newly_kept</code>, <code>added_artifacts</code>, <code>removed_artifacts</code>,
+  <code>grade_regressions</code>, <code>columns_added</code>, <code>columns_removed</code>;</li>
+<li>the transition lists (<code>newly_always_passes</code> / <code>newly_dropped</code> / <code>newly_kept</code> as
+  artifact dicts with a truncated one-line <code>why</code>), <code>added_artifacts</code> /
+  <code>removed_artifacts</code> (artifact-id lists), <code>grade_regressions</code>, <code>schema_shape_changes</code>.</li>
+</ul>
+<p><code>alarming</code> is <code>True</code> iff there is signal rot (<code>newly_always_passes</code>) or a grade
+regression (<code>grade_regressions</code>) — those are the categories that page; <code>newly_kept</code> /
+<code>newly_dropped</code> / added / removed / schema-shape are informational.</p>
+<h3 id="worked-example-dag">Worked example DAG</h3>
+<p><code>examples/airflow/signalforge_nightly_drift.py</code> (<code>dag_id="signalforge_nightly_drift"</code>)
+ships both surfaces side by side: a <code>drift_monitor_ergonomic</code> task (Form 1) and a
+<code>generate</code> → <code>drift_check</code> pair (Form 2). It ships <code>schedule=None</code>; set
+<code>schedule="@daily"</code> for a real nightly monitor.</p>
+<h2 id="airflow-native-credentials-signalforgehook-signalforge_conn_id">Airflow-native credentials: <code>SignalForgeHook</code> + <code>signalforge_conn_id</code></h2>
+<p>Instead of managing <code>ANTHROPIC_API_KEY</code> / <code>DBT_PROFILES_DIR</code> as inline env on every
+task, configure SignalForge the <strong>Airflow-native</strong> way: one Airflow <strong>Connection</strong>
+(plus an optional <strong>Variable</strong> for the LLM key), referenced by both operators via the
+optional <code>signalforge_conn_id</code> param. The hook (<code>SignalForgeHook</code>) resolves that
+Connection into the three things a run needs — warehouse auth (<code>profiles_dir</code>), the LLM
+<code>provider</code>, and the <code>api_key</code> — and the operator injects the key into the run's
+environment only for the duration of that run.</p>
+<p><code>signalforge_conn_id</code> is <strong>opt-in</strong>: when it is <code>None</code> (the default) both operators
+behave exactly as before (ambient env / inline config), byte-identical to #232/#233.
+Set it to switch to the Connection-driven path.</p>
+<h3 id="setting-up-the-connection">Setting up the Connection</h3>
+<p>Create one Connection (Admin → Connections, or <code>airflow connections add</code>) and point
+both operators at it via <code>signalforge_conn_id="&lt;conn id&gt;"</code>:</p>
+<ul>
+<li><strong>Conn Type</strong> — any (e.g. <code>generic</code>); the hook reads only <code>password</code> + <code>extra</code>.</li>
+<li><strong>Password</strong> — the <strong>LLM API key</strong> (the <em>primary</em> key source). Airflow auto-masks a
+  Connection <code>password</code> in task logs.</li>
+<li><strong>Extra (JSON)</strong> — the validated schema below.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>airflow<span class="w"> </span>connections<span class="w"> </span>add<span class="w"> </span>signalforge_default<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--conn-type<span class="w"> </span>generic<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--conn-password<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$ANTHROPIC_API_KEY</span><span class="s2">&quot;</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--conn-extra<span class="w"> </span><span class="s1">&#39;{&quot;profiles_dir&quot;: &quot;/opt/airflow/dbt_project&quot;, &quot;provider&quot;: &quot;anthropic&quot;, &quot;cache_scope&quot;: &quot;project&quot;}&#39;</span>
+</code></pre></div>
+<h3 id="connection-extra-schema-validated-extraforbid">Connection <code>extra</code> schema (validated <code>extra="forbid"</code>)</h3>
+<p>The <code>extra</code> JSON is parsed through a Pydantic model with <code>extra="forbid"</code>, so an
+<strong>unknown key fails loud</strong> at resolution (a typo like <code>cache_scop</code> raises
+<code>AirflowConfigError</code>, tier 2 — it never silently no-ops). Exactly three keys, all
+optional:</p>
+<table>
+<thead>
+<tr>
+<th><code>extra</code> key</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>profiles_dir</code></td>
+<td>Directory holding the dbt <code>profiles.yml</code> → mapped to <code>--profiles-dir</code> (warehouse auth). Omit to use the worker's ambient <code>DBT_PROFILES_DIR</code>.</td>
+</tr>
+<tr>
+<td><code>provider</code></td>
+<td>LLM SKU family — <code>anthropic</code> / <code>openai</code> / <code>gemini</code>. Selects the env var the resolved key is injected into (see allowlist below). Omit for a prune-existing-only Connection (no LLM call).</td>
+</tr>
+<tr>
+<td><code>cache_scope</code></td>
+<td><code>per-model</code> / <code>project</code> — the Anthropic cached-prefix knob. <strong>Generate only</strong> (PruneExisting ignores it).</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Cost ceilings are deliberately NOT supported in the <code>extra</code> for v0.7</strong> (there is no
+CLI flag that delivers them — <code>config_overrides</code> is deferred, DEC-011). Bound a
+scheduled DAG's spend through the committed <code>signalforge.yml grade:</code> block instead
+(<code>max_grade_cost_usd</code> / <code>max_grade_calls</code> / <code>max_grade_tokens</code> / <code>total_budget_seconds</code>
+— see the <strong>Cost / time guardrails via <code>signalforge.yml</code></strong> section above).</p>
+<h3 id="api-key-password-primary-variable-fallback">API key: <code>password</code> primary, Variable fallback</h3>
+<p>The key's primary source is the Connection <code>password</code>. When that is empty, the hook
+falls back to an Airflow <strong>Variable</strong> named <strong><code>signalforge_api_key</code></strong> (the
+<code>signalforge.airflow._resolve.API_KEY_VARIABLE_KEY</code> constant — a single fixed,
+provider-agnostic name):</p>
+<div class="highlight"><pre><span></span><code>airflow<span class="w"> </span>variables<span class="w"> </span><span class="nb">set</span><span class="w"> </span>signalforge_api_key<span class="w"> </span><span class="s2">&quot;</span><span class="nv">$ANTHROPIC_API_KEY</span><span class="s2">&quot;</span>
+</code></pre></div>
+<p>The resolver is <strong>lenient</strong> — it returns <code>api_key</code> / <code>provider</code> as <code>None</code> when absent;
+<em>requiredness is enforced by the consuming operator</em> (Generate raises when either is
+missing; PruneExisting needs neither). Prefer the Connection <code>password</code> (it auto-masks);
+the Variable is the fallback.</p>
+<h3 id="provider-allowlist-closed">Provider allowlist (closed)</h3>
+<p><code>provider</code>, when present, must be one of a <strong>closed allowlist</strong> — the single source of
+truth is <code>signalforge.llm.providers.PROVIDER_ENV_VAR_KEYS</code>:</p>
+<table>
+<thead>
+<tr>
+<th><code>provider</code></th>
+<th>env var the key is injected into</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>anthropic</code></td>
+<td><code>ANTHROPIC_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>openai</code></td>
+<td><code>OPENAI_API_KEY</code></td>
+</tr>
+<tr>
+<td><code>gemini</code></td>
+<td><code>GOOGLE_API_KEY</code> (the <code>google-genai</code> SDK's convention, not a <code>GEMINI_*</code> name)</td>
+</tr>
+</tbody>
+</table>
+<p>An <strong>unknown provider fails loud</strong> (<code>AirflowConfigError</code>) — the check runs whenever
+<code>provider</code> is set, regardless of operator, so an arbitrary env-var name can never be
+derived from a Connection (this closes the arbitrary-env-var injection vector even for a
+prune-existing-only Connection that happens to set <code>provider</code>).</p>
+<h3 id="precedence-explicit-param-connection-extra-default-dec-012">Precedence: explicit param &gt; Connection <code>extra</code> &gt; default (DEC-012)</h3>
+<p>For the two knobs that exist on both surfaces — <code>profiles_dir</code> (both operators) and
+<code>cache_scope</code> (Generate only) — an explicit, non-empty <strong>operator param wins</strong> over the
+Connection <code>extra</code> value, which in turn wins over the downstream tool default. Mirrors
+the CLI's <code>flag &gt; YAML &gt; default</code> precedence: set <code>profiles_dir=...</code> on the operator to
+override the Connection's <code>extra.profiles_dir</code> for that one task.</p>
+<h3 id="generate-vs-pruneexisting-credentials-dec-016">Generate vs PruneExisting credentials (DEC-016)</h3>
+<p>The two operators consume the <strong>same</strong> Connection differently:</p>
+<ul>
+<li><strong><code>SignalForgeGenerateOperator</code></strong> calls the LLM, so it <strong>requires</strong> both a <code>provider</code>
+  and an <code>api_key</code> (else <code>AirflowConfigError</code>), and uses <code>profiles_dir</code> for warehouse
+  auth. It masks the resolved key, precedence-merges <code>profiles_dir</code> / <code>cache_scope</code>, and
+  injects the provider's API-key env var around the run.</li>
+<li><strong><code>SignalForgePruneExistingOperator</code></strong> is read-only and makes <strong>no LLM call</strong>, so it
+  uses <strong>only</strong> <code>profiles_dir</code> — <code>provider</code> / <code>api_key</code> / <code>cache_scope</code> on the resolution
+  are ignored. It calls <strong>no</strong> <code>register_secret</code>, injects <strong>no</strong> provider env var. A
+  prune-existing-only deployment can therefore use a Connection with just
+  <code>{"profiles_dir": "..."}</code> and no <code>password</code> / <code>provider</code> at all. (An allowlist-invalid
+  <code>provider</code>, if one <em>is</em> present, still raises in the resolver per the closed allowlist.)</li>
+</ul>
+<h3 id="secrets-hygiene-the-four-surfaces">Secrets hygiene — the four surfaces</h3>
+<p>The resolved LLM API key never appears in any of these:</p>
+<ol>
+<li><strong>Task logs</strong> — Airflow's secrets-masker (the operator calls <code>register_secret(key)</code>
+   before any logging or run, belt-and-braces over Airflow's auto-masking of a
+   Connection <code>password</code>).</li>
+<li><strong>XCom</strong> — <code>to_xcom()</code> carries tier <strong>counts + sidecar paths only</strong> (no secrets); the
+   key is held in a local, never stored on the operator/hook instance.</li>
+<li><strong>Rendered templates</strong> — <code>signalforge_conn_id</code> is <strong>NOT</strong> a <code>template_fields</code> entry
+   (templating a credential reference is an avoidable leak surface), so it never renders
+   into the task-instance rendered fields.</li>
+<li><strong><code>__repr__</code></strong> — <code>SignalForgeHook.__repr__</code> shows only the conn id; the resolution's
+   <code>HookResolution.__repr__</code> shows only <code>profiles_dir</code> + <code>provider</code> — never the key value
+   <em>or</em> a field-name label that would reveal a credential is present (mirrors
+   <code>SnowflakeAdapter.__repr__</code>).</li>
+</ol>
+<h3 id="in-process-concurrency-caveat-dec-015">In-process concurrency caveat (DEC-015)</h3>
+<p>For <code>invocation="in_process"</code> (the default), the operator injects the provider's API-key
+env var into <code>os.environ</code> only <strong>around</strong> the <code>run_signalforge</code> call and restores it in a
+<code>finally</code> (absent-before → deleted; prior value → restored) — so the secret does not
+linger in a long-lived worker across tasks. But because <code>os.environ</code> (and the in-process
+stdout capture) is <strong>process-global</strong>, two concurrent in-process tasks in the <em>same</em>
+worker can race on the injected key / captured output. <strong>Prefer <code>invocation="subprocess"</code>
+for concurrent multi-task workers</strong> — it runs each task in a fresh interpreter with its
+own environment.</p>
+<h3 id="usage_1">Usage</h3>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">signalforge.airflow</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+    <span class="n">SignalForgeGenerateOperator</span><span class="p">,</span>
+    <span class="n">SignalForgePruneExistingOperator</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># Generate: needs provider + key + profiles_dir, all from the Connection.</span>
+<span class="n">generate</span> <span class="o">=</span> <span class="n">SignalForgeGenerateOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;drift_monitor&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/dbt_project&quot;</span><span class="p">,</span>
+    <span class="n">signalforge_conn_id</span><span class="o">=</span><span class="s2">&quot;signalforge_default&quot;</span><span class="p">,</span>
+    <span class="n">select</span><span class="o">=</span><span class="s2">&quot;tag:staging&quot;</span><span class="p">,</span>
+    <span class="n">write</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<span class="p">)</span>
+
+<span class="c1"># PruneExisting: uses ONLY profiles_dir from the same Connection (no LLM key).</span>
+<span class="n">prune</span> <span class="o">=</span> <span class="n">SignalForgePruneExistingOperator</span><span class="p">(</span>
+    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;signal_rot_monitor&quot;</span><span class="p">,</span>
+    <span class="n">project_dir</span><span class="o">=</span><span class="s2">&quot;/opt/airflow/dbt_project&quot;</span><span class="p">,</span>
+    <span class="n">signalforge_conn_id</span><span class="o">=</span><span class="s2">&quot;signalforge_default&quot;</span><span class="p">,</span>
+    <span class="n">model</span><span class="o">=</span><span class="s2">&quot;models/staging/stg_orders.sql&quot;</span><span class="p">,</span>
+    <span class="n">schema</span><span class="o">=</span><span class="s2">&quot;models/staging/schema.yml&quot;</span><span class="p">,</span>
+<span class="p">)</span>
+</code></pre></div>
+<p>The shipped example DAG <code>examples/airflow/signalforge_hook_dag.py</code>
+(<code>dag_id: signalforge_hook</code>) configures <strong>both</strong> operators via a single
+<code>signalforge_conn_id</code> (+ the <code>signalforge_api_key</code> Variable) with <strong>no inline per-task
+env</strong> — copy it as a starting point.</p>
+<h2 id="scheduling-for-drift-detection">Scheduling for drift detection</h2>
+<p>The example ships with <code>schedule=None</code> (manual trigger) so it never auto-spends on
+credentials. For nightly schema-drift / signal-rot monitoring, set
+<code>schedule="@daily"</code> (or run it as a downstream task after your dbt <code>run</code> / <code>build</code>). A
+test that <em>used</em> to catch failing rows but now always-passes is exactly the signal-rot
+this surfaces — gate or alert on the run-over-run tier-count delta.</p>
+<h2 id="running-it">Running it</h2>
+<p>Headless (no scheduler) — fastest for a one-shot:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">set</span><span class="w"> </span>-a<span class="p">;</span><span class="w"> </span><span class="nb">export</span><span class="w"> </span><span class="nv">SF_PROJECT_DIR</span><span class="o">=</span>/path/to/dbt<span class="w"> </span><span class="nv">SF_MODEL</span><span class="o">=</span>models/staging/stg_orders.sql<span class="p">;</span><span class="w"> </span><span class="nb">set</span><span class="w"> </span>+a
+.venv-airflow/bin/python<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;from airflow.models.dagbag import DagBag; \</span>
+<span class="s2">  DagBag(&#39;examples/airflow&#39;, include_examples=False).dags[&#39;signalforge_generate&#39;].test()&quot;</span>
+</code></pre></div>
+<p>In the UI:</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">AIRFLOW__CORE__DAGS_FOLDER</span><span class="o">=</span><span class="s2">&quot;</span><span class="k">$(</span><span class="nb">pwd</span><span class="k">)</span><span class="s2">/examples/airflow&quot;</span>
+.venv-airflow/bin/airflow<span class="w"> </span>standalone<span class="w">   </span><span class="c1"># admin password printed; UI on :8080 → trigger signalforge_generate</span>
+</code></pre></div>
+<h2 id="managed-airflow-runtimes-astronomer-mwaa-composer">Managed Airflow runtimes (Astronomer / MWAA / Composer)</h2>
+<p>SignalForge's Airflow operators are <strong>documented, not certified</strong> against managed
+Airflow runtimes — <strong>Astronomer</strong>, <strong>AWS MWAA</strong>, and <strong>Google Cloud Composer</strong>. The
+certified target is the constraints-pinned local stack above (<code>apache-airflow 2.10.4</code>
+on Python 3.11); the notes below are <strong>pointers, not a support claim</strong>. Treat them as a
+starting point and validate against your own runtime.</p>
+<p>The integration is designed to drop into a managed runtime cleanly — the base
+<code>pip install signalforge-dbt</code> stays <strong>Airflow-free</strong> (Architectural Commitment #4), so
+it can sit alongside whatever Airflow the runtime already pins without dragging a second
+Airflow tree into the resolution. Three practical caveats under a managed scheduler:</p>
+<ul>
+<li><strong>The <code>[airflow]</code> extra vs the runtime's pinned Airflow.</strong> A managed runtime ships its
+  own Airflow at a fixed version, installed under its own constraints. Do <strong>not</strong> let
+  <code>signalforge-dbt[airflow]</code> (which declares <code>apache-airflow&gt;=2.8,&lt;3</code>) re-resolve or
+  upgrade that Airflow. Install SignalForge <strong>compatibly</strong> — typically just
+  <code>signalforge-dbt</code> (the operators import Airflow from the runtime; the <code>[airflow]</code>
+  extra exists mainly to pin Airflow in a <em>standalone</em> env). When you do need the extra,
+  add it under the runtime's own constraints file (the same <code>--constraint</code> discipline as
+  the local install above) so it can never pull Airflow's pins forward. The certified
+  version floor lives in <code>docs/research/airflow-test-environment.md</code> — confirm your
+  runtime's Airflow is <code>&gt;=2.8,&lt;3</code>.</li>
+<li><strong>Where credentials live — the runtime's secrets backend.</strong> Prefer the Airflow-native
+  <code>SignalForgeHook</code> + <code>signalforge_conn_id</code> path (see the <strong>Airflow-native credentials</strong>
+  section) over inline per-task env. On a managed runtime, the Connection / Variable it
+  resolves come from that runtime's configured <strong>secrets backend</strong> (Astronomer secrets,
+  AWS Secrets Manager for MWAA, Google Secret Manager for Composer) — SignalForge reads
+  the resolved Connection / Variable exactly the same way regardless of backend, so the
+  LLM key and <code>profiles_dir</code> stay out of your DAG source and out of task logs.</li>
+<li><strong>The base install stays Airflow-free.</strong> Because <code>signalforge-dbt</code>'s core has no
+  Airflow dependency, adding SignalForge to a managed image is additive — it never forces
+  the runtime's Airflow version. The operators resolve Airflow lazily at <em>construction</em>
+  time, so importing <code>signalforge.airflow</code> in a DAG file parses fine even on a worker
+  image where the extra wasn't separately installed (construction then fails loud with
+  the <code>pip install 'signalforge-dbt[airflow]'</code> pointer if Airflow truly is absent).</li>
+</ul>
+<p>These are deployment pointers only — for the certified version floor, the <code>airflow</code>
+pytest marker, and the CI test recipe, see <code>docs/research/airflow-test-environment.md</code>.</p>
+<h2 id="testing">Testing</h2>
+<p><code>tests/airflow/test_dag_parse.py</code> ships gated tests (<code>@pytest.mark.airflow</code>):</p>
+<ul>
+<li><strong>parse</strong> — <code>DagBag</code> loads each shipped example with zero import errors and the
+  expected tasks present: the two-<code>PythonOperator</code> pipeline (<code>signalforge_generate</code>), the
+  <code>SignalForgeGenerateOperator</code> drift monitor (<code>signalforge_generate_operator</code>), the
+  <code>SignalForgePruneExistingOperator</code> signal-rot monitor
+  (<code>signalforge_prune_existing_operator</code>), the Connection-configured both-operators
+  example (<code>signalforge_hook</code> — <code>drift_monitor</code> + <code>signal_rot_monitor</code> wired via
+  <code>signalforge_conn_id</code>), and the run-over-run drift monitor
+  (<code>signalforge_nightly_drift</code>). No credentials; runs in the gated CI <code>airflow</code> job.</li>
+<li><strong>render</strong> — each operator's <code>template_fields</code> Jinja-render from a synthetic task
+  context (e.g. <code>{{ params.model }}</code> / <code>{{ ds }}</code>).</li>
+<li><strong>execute</strong> — <code>tests/airflow/test_drift_operators.py</code> and
+  <code>tests/airflow/test_operators.py</code> drive each operator's <code>execute</code> against a fake
+  <code>run_signalforge</code> (and, for the dedicated drift operator, the committed
+  <code>tests/fixtures/airflow/drift_pairs/*.json</code> sidecars): the result/drift → <code>TaskOutcome</code>
+  → Airflow-signal translation, the XCom shape, and the baseline / degrade / unparseable
+  paths. No credentials; runs in the gated CI <code>airflow</code> job.</li>
+<li><strong>live</strong> — runs the <code>generate</code> task against an <code>init-demo</code> project; self-skips without
+  <code>SF_RUN_AIRFLOW=1</code> + <code>ANTHROPIC_API_KEY</code> + <code>GOOGLE_CLOUD_PROJECT</code> + <code>SF_RUN_BQ</code>.</li>
+</ul>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>run<span class="w"> </span>--no-sync<span class="w"> </span>pytest<span class="w"> </span>-m<span class="w"> </span>airflow<span class="w"> </span>--no-cov<span class="w">   </span><span class="c1"># inside the constraints-pinned airflow venv</span>
+</code></pre></div>
+<h2 id="caveats">Caveats</h2>
+<ul>
+<li><strong>Three operators have landed (epic #228):</strong> the <code>SignalForgeGenerateOperator</code> (#232,
+  <a href="#signalforgegenerateoperator">section</a>), the no-LLM <code>SignalForgePruneExistingOperator</code>
+  (#233, <a href="#signalforgepruneexistingoperator">section</a>), and the run-over-run drift surface
+  (#235) — <code>detect_drift_against</code> on the generate operator plus the dedicated
+  <code>SignalForgeDriftOperator</code> (<a href="#drift--signal-rot-detection">section</a>). The <code>PythonOperator</code>
+  example DAG remains a from-scratch reference.</li>
+<li><strong>Time-bound tests + reproducibility.</strong> If your draft includes the time-bound
+  <code>row_count_anomaly_by_period</code> variant, pass <code>--as-of YYYY-MM-DD</code> (the DAG's logical
+  date is a natural source) so a re-run is reproducible — see <code>docs/prune-ops.md</code>.</li>
+<li><strong>Cost.</strong> Each <code>generate</code> run spends real Anthropic + warehouse budget; the prune
+  engine's <code>maximum_bytes_billed</code> cap and <code>--dry-run</code> (no file writes) bound it. A
+  <code>prune-existing</code> run spends <strong>warehouse budget only</strong> (no LLM call), bounded by the
+  same <code>maximum_bytes_billed</code> cap.</li>
+<li><strong>Managed runtimes are documented, not certified.</strong> Running on Astronomer / MWAA /
+  Composer is supported as a set of deployment pointers (the <code>[airflow]</code>-extra vs
+  pinned-Airflow interplay, the secrets-backend credential path) — not a certification.
+  See the <strong>Managed Airflow runtimes</strong> section above.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>

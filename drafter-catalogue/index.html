@@ -1,0 +1,1881 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Draft dbt schema.yml, tests, and docs with an LLM, then prune candidates against real warehouse data so only signal-bearing artifacts ship.">
+      
+      
+      
+        <link rel="canonical" href="https://wjduenow.github.io/SignalForge/drafter-catalogue/">
+      
+      
+        <link rel="prev" href="../skills/">
+      
+      
+        <link rel="next" href="../manifest-loader-ops/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../assets/images/favicon.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Test Catalogue - SignalForge</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#test-catalogue-what-signalforge-generates" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="SignalForge" class="md-header__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            SignalForge
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Test Catalogue
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="indigo" data-md-color-accent="indigo"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href=".." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cli-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  CLI Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../skills/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Claude Code Skill
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    <li class="md-tabs__item md-tabs__item--active">
+      <a href="./" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Test Catalogue
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../manifest-loader-ops/" class="md-tabs__link">
+          
+  
+  
+  Pipeline Stages
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../llm-providers-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  LLM Providers
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../airflow-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Airflow Integration
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../cost-estimate-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Cost Estimate
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../audits/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Audits & Sidecars
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../e2e-smoke-test/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  End-to-End Smoke Test
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../snowflake-e2e-setup/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Snowflake E2E Setup
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../codecov-ops/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Coverage Setup
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="SignalForge" class="md-nav__button md-logo" aria-label="SignalForge" data-md-component="logo">
+      
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
+
+    </a>
+    SignalForge
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/wjduenow/SignalForge" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    wjduenow/SignalForge
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cli-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    CLI Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../skills/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Claude Code Skill
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Catalogue
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Test Catalogue
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-eight-first-class-primitives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The eight first-class primitives
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The eight first-class primitives">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#not_null" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        not_null
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        unique
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#accepted_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        accepted_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#relationships" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        relationships
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#custom_sql-the-catch-all" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        custom_sql — the catch-all
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#row_count_between" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_count_between
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unique_combination" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        unique_combination
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#row_count_anomaly_by_period" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_count_anomaly_by_period
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-we-do-not-generate-today" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What we do NOT generate today
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipeline Stages
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Pipeline Stages
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../manifest-loader-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Manifest Loader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../warehouse-adapter-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Warehouse Adapter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../safety-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Safety Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../draft-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Drafter
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../ingest-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Ingest Layer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../prune-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Prune Engine
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../grade-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Quality Grader
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../diff-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diff Renderer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../llm-providers-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    LLM Providers
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../airflow-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Airflow Integration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cost-estimate-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cost Estimate
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../audits/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Audits & Sidecars
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../e2e-smoke-test/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    End-to-End Smoke Test
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../snowflake-e2e-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Snowflake E2E Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../codecov-ops/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Coverage Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-eight-first-class-primitives" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The eight first-class primitives
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="The eight first-class primitives">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#not_null" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        not_null
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        unique
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#accepted_values" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        accepted_values
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#relationships" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        relationships
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#custom_sql-the-catch-all" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        custom_sql — the catch-all
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#row_count_between" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_count_between
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#unique_combination" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        unique_combination
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#row_count_anomaly_by_period" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        row_count_anomaly_by_period
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-we-do-not-generate-today" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What we do NOT generate today
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#references" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        References
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="test-catalogue-what-signalforge-generates">Test catalogue (what SignalForge generates)</h1>
+<blockquote>
+<p>Single source of truth for the test shapes SignalForge's drafter proposes
+and the prune + grade pipeline evaluates.</p>
+</blockquote>
+<p>These are the test shapes SignalForge auto-generates against your dbt models.
+Each first-class primitive carries structural slots the drafter targets, an
+ingest signature so <code>prune-existing</code> recognises hand-authored equivalents,
+and rubric coverage so kept artifacts ship with a calibrated "why." The
+catch-all <code>custom_sql</code> variant covers business rules the structured primitives
+can't express. The "What we do NOT generate today" section names the shapes
+SignalForge explicitly does not propose — useful for evaluating whether the
+catalogue covers your project's patterns.</p>
+<h2 id="the-eight-first-class-primitives">The eight first-class primitives</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>dbt equivalent</th>
+<th>Scope</th>
+<th>Structural slots</th>
+<th>Semantics</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>not_null</code></td>
+<td>dbt generic test</td>
+<td>column</td>
+<td>—</td>
+<td>Column has no NULL rows</td>
+</tr>
+<tr>
+<td><code>unique</code></td>
+<td>dbt generic test</td>
+<td>column</td>
+<td>—</td>
+<td>Column has no duplicate values</td>
+</tr>
+<tr>
+<td><code>accepted_values</code></td>
+<td>dbt generic test</td>
+<td>column</td>
+<td><code>values: list</code></td>
+<td>Column values are all in a declared set</td>
+</tr>
+<tr>
+<td><code>relationships</code></td>
+<td>dbt generic test</td>
+<td>column</td>
+<td><code>to</code>, <code>field</code></td>
+<td>Every value matches a row in a parent table</td>
+</tr>
+<tr>
+<td><code>custom_sql</code></td>
+<td>singular test (<code>tests/*.sql</code>)</td>
+<td>column or model</td>
+<td><code>sql</code></td>
+<td>Free-form business-rule SELECT (catch-all)</td>
+</tr>
+<tr>
+<td><code>row_count_between</code></td>
+<td><code>dbt_expectations.expect_table_row_count_to_be_between</code></td>
+<td>model</td>
+<td><code>minimum</code>, <code>maximum</code>, optional <code>where</code></td>
+<td>Row count is within bounds</td>
+</tr>
+<tr>
+<td><code>unique_combination</code></td>
+<td><code>dbt_utils.unique_combination_of_columns</code></td>
+<td>model</td>
+<td><code>columns</code> (≥2), optional <code>where</code></td>
+<td>Composite tuple of columns is unique</td>
+</tr>
+<tr>
+<td><code>row_count_anomaly_by_period</code></td>
+<td>singular test (<code>tests/*.sql</code>)</td>
+<td>model</td>
+<td><code>date_column</code>, <code>method</code>, <code>seasonality</code>, <code>period</code>, <code>lookback_periods</code>, <code>threshold</code>, <code>min_samples_per_bucket</code>, optional <code>where</code></td>
+<td>Most-recent period's row count falls outside the band predicted from history</td>
+</tr>
+</tbody>
+</table>
+<h3 id="not_null"><code>not_null</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">stg_bikeshare_trips</span>
+<span class="w">    </span><span class="nt">columns</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">trip_id</span>
+<span class="w">        </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">          </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">not_null</span>
+</code></pre></div>
+<p>The drafter proposes <code>not_null</code> for columns that the source SQL or the model's
+SELECT body guarantees populated (primary keys, monotonic timestamps, columns
+the source declares <code>NOT NULL</code>). Prune drops it as <code>always-passes</code> when zero
+NULL rows surface in the warehouse sample.</p>
+<h3 id="unique"><code>unique</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">columns</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">trip_id</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unique</span>
+</code></pre></div>
+<p>The drafter proposes <code>unique</code> for columns it identifies as a model's grain
+(natural keys, surrogate IDs, declared primary keys). Prune evaluates via
+<code>GROUP BY &lt;col&gt; HAVING COUNT(*) &gt; 1</code>.</p>
+<h3 id="accepted_values"><code>accepted_values</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">columns</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">subscriber_type</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">accepted_values</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">values</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="s">&#39;member&#39;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&#39;casual&#39;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="s">&#39;unknown&#39;</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p>The drafter proposes <code>accepted_values</code> for low-cardinality categorical columns
+whose domain can be enumerated from sampled data or column comments. Prune
+evaluates via <code>WHERE col IS NOT NULL AND col NOT IN (...)</code>.</p>
+<h3 id="relationships"><code>relationships</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">columns</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">start_station_id</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">relationships</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">to</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ref(&#39;stg_bikeshare_stations&#39;)</span>
+<span class="w">          </span><span class="nt">field</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">station_id</span>
+</code></pre></div>
+<p>The drafter proposes <code>relationships</code> for foreign-key columns identifiable from
+SELECT joins, dbt <code>ref()</code> calls in the model SQL, or column-name conventions
+(<code>*_id</code> matching a sibling model's grain). Prune evaluates via child→parent
+LEFT JOIN, flagging child rows whose parent reference is absent.</p>
+<h3 id="custom_sql-the-catch-all"><code>custom_sql</code> — the catch-all</h3>
+<div class="highlight"><pre><span></span><code><span class="c1"># meta.signalforge.business_rules on the model:</span>
+<span class="nt">config</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">meta</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">signalforge</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">business_rules</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;total_amount</span><span class="nv"> </span><span class="s">must</span><span class="nv"> </span><span class="s">never</span><span class="nv"> </span><span class="s">be</span><span class="nv"> </span><span class="s">negative&quot;</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1">-- drafted as tests/dim_orders__total_amount_custom_sql_a1b2c3d4.sql</span>
+<span class="c1">-- signalforge:generated a1b2c3d4</span>
+<span class="k">select</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">from</span><span class="w"> </span><span class="err">{{</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="err">}}</span><span class="w"> </span><span class="k">where</span><span class="w"> </span><span class="n">total_amount</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="mi">0</span>
+</code></pre></div>
+<p><code>custom_sql</code> is a full singular-test SELECT — the LLM translates a plain-English
+business rule (declared via <code>meta.signalforge.business_rules</code>) or an inferred
+checkable invariant from the model SQL into a failing-rows SELECT. The SELECT
+may reference <code>{{ this }}</code>, <code>{{ ref('m') }}</code>, and <code>{{ source('s','t') }}</code>;
+control-flow Jinja is rejected loudly. Multi-table rules (a JOIN) run full-scan
+within the warehouse <code>maximum_bytes_billed</code> cap rather than against a sample.</p>
+<p><strong><code>custom_sql</code> is the catch-all — graded less structurally than the six
+first-class primitives.</strong> The grader scores it ad-hoc against the rubric
+criteria (clarity, consistency, rationale, no-redundant), but the rubric has
+no per-primitive calibration for it — operators get the same kept / dropped
+outcome from the prune step, with rationale-based grade scoring rather than
+the structured calibration the bounded variants enjoy. Reach for one of the
+six first-class primitives when your rule fits one of their shapes; reach for
+<code>custom_sql</code> when none of them do.</p>
+<p>See <a href="../draft-ops/#custom-business-rule-tests-custom_sql"><code>docs/draft-ops.md</code> § Custom business-rule tests</a>
+for the full drafting path; <a href="../prune-ops/#custom_sql-evaluation"><code>docs/prune-ops.md</code> § <code>custom_sql</code> evaluation</a>
+for the prune cost shape; <a href="../ingest-ops/"><code>docs/ingest-ops.md</code></a> for how
+<code>prune-existing</code> ingests hand-authored singular tests.</p>
+<h3 id="row_count_between"><code>row_count_between</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">daily_revenue_rollup</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dbt_expectations.expect_table_row_count_to_be_between</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">min_value</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<span class="w">          </span><span class="nt">max_value</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">100000</span>
+<span class="w">          </span><span class="nt">where</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;event_date</span><span class="nv"> </span><span class="s">&gt;=</span><span class="nv"> </span><span class="s">&#39;2024-01-01&#39;&quot;</span>
+</code></pre></div>
+<p><code>row_count_between</code> is a <strong>model-level bounded-cardinality assertion</strong>: the
+table's <code>COUNT(*)</code> (optionally narrowed by <code>where</code>) must lie within
+<code>[minimum, maximum]</code>. Either bound may be <code>None</code>; at least one must be set.
+The drafter proposes it for bounded aggregations (a <code>GROUP BY</code> with a date
+window), daily/weekly rollups where a sudden empty day is a real signal,
+and monitoring-shaped reports. The prune engine evaluates via a failing-rows
+CTE wrapping a single <code>COUNT(*)</code> — cheap even on petabyte tables.</p>
+<p><strong>Sample-mode behaviour — engine routes past the materialised sample.</strong> A
+<code>COUNT(*)</code> against a sampled relation returns the <em>sample size</em>, not the
+model's true row count, so a sample-mode verdict would be semantically
+wrong by construction. The prune engine's per-test loop routes
+<code>row_count_between</code> past the materialised-sample substitution back to the
+source table under both <code>prune.scope="sample"</code> strategies (<code>materialised</code>
+or <code>oneshot</code>). The same source-vs-temp pattern applies to
+<code>unique_combination</code> below (issue #170 extended both conditionals in
+lockstep). See <a href="../prune-ops/#row_count_between"><code>docs/prune-ops.md</code> § <code>row_count_between</code></a>
+for the engine routing.</p>
+<p>See <a href="../draft-ops/#row-count-tests-row_count_between"><code>docs/draft-ops.md</code> § Row-count tests</a>
+for drafting; <a href="../prune-ops/#row-count-cost-model"><code>docs/prune-ops.md</code> § Row-count cost model</a>
+for evaluation; <a href="../ingest-ops/#recognition-of-expect_table_row_count_to_be_between"><code>docs/ingest-ops.md</code> § Recognition of <code>expect_table_row_count_to_be_between</code></a>
+for <code>prune-existing</code> recognition; <a href="../grade-ops/#row-count-calibration"><code>docs/grade-ops.md</code> § Row-count calibration</a>
+for grain-meaningfulness grading.</p>
+<h3 id="unique_combination"><code>unique_combination</code></h3>
+<div class="highlight"><pre><span></span><code><span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fct_order_line_items</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dbt_utils.unique_combination_of_columns</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">combination_of_columns</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">order_id</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">line_item_id</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><span class="c1"># with optional where filter:</span>
+<span class="nt">models</span><span class="p">:</span>
+<span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">dim_user_daily_active</span>
+<span class="w">    </span><span class="nt">tests</span><span class="p">:</span>
+<span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">dbt_utils.unique_combination_of_columns</span><span class="p">:</span>
+<span class="w">          </span><span class="nt">combination_of_columns</span><span class="p">:</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">user_id</span>
+<span class="w">            </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
+<span class="w">          </span><span class="nt">where</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;is_active</span><span class="nv"> </span><span class="s">=</span><span class="nv"> </span><span class="s">true&quot;</span>
+</code></pre></div>
+<p><code>unique_combination</code> is a <strong>model-level composite-key uniqueness assertion</strong>:
+the tuple <code>(columns[0], columns[1], ...)</code> must be unique across the model
+(optionally narrowed by <code>where</code>). The <code>columns</code> array must carry <strong>at least
+two columns</strong> — single-column uniqueness is the existing <code>unique</code> test type.
+The drafter proposes it for composite-key grains (<code>(order_id, line_item_id)</code>
+on an order-line table, <code>(user_id, day)</code> on a daily activity rollup,
+<code>(start_station_id, end_station_id, trip_date)</code> on a trip-pairs aggregate).
+The prune engine evaluates via <code>GROUP BY &lt;cols&gt; HAVING COUNT(*) &gt; 1</code> — the
+same shuffle cost as single-column <code>unique</code>.</p>
+<p><strong>Vacuously-unique tuples are dropped or flagged.</strong> A tuple like
+<code>(primary_key, anything)</code> is always unique by construction (the primary key
+alone guarantees it) and adds no signal beyond the existing single-column
+<code>unique</code> test — the drafter prompt steers away from these, the grade rubric's
+<code>no-redundant</code> criterion scores them low (typically <code>0.0</code>–<code>0.2</code>, routing
+the artifact to <strong><code>flagged</code></strong>), and the prune engine catches the strict
+cases as <code>always-passes</code>.</p>
+<p><strong>Sample-mode behaviour — engine routes past the materialised sample.</strong> A
+sampled <code>GROUP BY</code> is semantically approximate (uniqueness violations in the
+full table may not surface in the sample → false-negative). <code>prune_tests</code>
+therefore overrides the table reference to the <strong>source table</strong> for every
+<code>unique_combination</code> candidate, regardless of <code>sample_strategy</code>
+(<code>materialised</code> or <code>oneshot</code>). Mirrors the <code>row_count_between</code> metadata-bypass
+pattern.</p>
+<p>See <a href="../draft-ops/#composite-uniqueness-unique_combination"><code>docs/draft-ops.md</code> § Composite uniqueness</a>
+for drafting; <a href="../prune-ops/#unique_combination--same-engine-routing-group-by-shape-issue-170"><code>docs/prune-ops.md</code> § <code>unique_combination</code></a>
+for the engine routing (same source-vs-temp pattern as <code>row_count_between</code>);
+<a href="../ingest-ops/#recognition-of-dbt_utilsunique_combination_of_columns"><code>docs/ingest-ops.md</code> § Recognition of <code>dbt_utils.unique_combination_of_columns</code></a>
+for <code>prune-existing</code> recognition; <a href="../grade-ops/#row-count-calibration"><code>docs/grade-ops.md</code> § Row-count calibration</a>
+for grain-meaningfulness grading (the <code>no-redundant</code> criterion extends to
+<code>unique_combination</code> calibration too).</p>
+<h3 id="row_count_anomaly_by_period"><code>row_count_anomaly_by_period</code></h3>
+<div class="highlight"><pre><span></span><code><span class="c1">-- drafted as tests/orders_daily__row_count_anomaly_by_period_a1b2c3d4.sql</span>
+<span class="c1">-- signalforge:generated a1b2c3d4</span>
+<span class="c1">-- method=mad seasonality=none period=day lookback_periods=28 threshold=3.0</span>
+<span class="c1">-- as_of=2026-05-01</span>
+<span class="c1">-- (full anomaly-band SELECT — see compiled SQL in .signalforge/prune.jsonl)</span>
+<span class="k">select</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">from</span><span class="w"> </span><span class="err">{{</span><span class="w"> </span><span class="n">this</span><span class="w"> </span><span class="err">}}</span>
+<span class="k">where</span><span class="w"> </span><span class="n">date_trunc</span><span class="p">(</span><span class="n">loaded_at</span><span class="p">,</span><span class="w"> </span><span class="k">day</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">date</span><span class="w"> </span><span class="s1">&#39;2026-05-01&#39;</span>
+<span class="w">  </span><span class="k">and</span><span class="w"> </span><span class="k">abs</span><span class="p">(</span><span class="o">&lt;</span><span class="k">row_count</span><span class="o">&gt;</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="o">&lt;</span><span class="n">median</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">3</span><span class="p">.</span><span class="mi">0</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="o">&lt;</span><span class="n">mad</span><span class="o">&gt;</span>
+</code></pre></div>
+<p><code>row_count_anomaly_by_period</code> is a <strong>model-level time-series anomaly check on
+the model's own row count per time-bucket</strong>. The drafter predicts a row-count
+band from the model's <code>lookback_periods</code> (default <code>28</code>) of history and the
+prune engine flags the most-recent period when its <code>COUNT(*)</code> falls outside
+the band. Four statistical methods × two seasonality knobs ship in v0.7:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Default</th>
+<th>Choices</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>method</code></td>
+<td><code>mad</code></td>
+<td><code>mad</code> (median absolute deviation), <code>zscore</code> (μ ± kσ), <code>percentile</code> (band between two percentiles), <code>min_max</code> (raw bounds from history)</td>
+</tr>
+<tr>
+<td><code>seasonality</code></td>
+<td><code>none</code></td>
+<td><code>none</code> (one band over all periods), <code>dow</code> (one band per day-of-week — for business-calendar grains)</td>
+</tr>
+<tr>
+<td><code>period</code></td>
+<td><code>day</code></td>
+<td><code>hour</code>, <code>day</code>, <code>week</code></td>
+</tr>
+<tr>
+<td><code>lookback_periods</code></td>
+<td><code>28</code></td>
+<td>any integer <code>&gt;= 1</code></td>
+</tr>
+<tr>
+<td><code>threshold</code></td>
+<td><code>3.0</code></td>
+<td><code>&gt; 0</code> (method-specific: standard deviations for <code>zscore</code>, MAD multiples for <code>mad</code>, percentile bounds for <code>percentile</code>; ignored for <code>min_max</code>)</td>
+</tr>
+<tr>
+<td><code>min_samples_per_bucket</code></td>
+<td><code>3</code></td>
+<td>any integer <code>&gt;= 1</code></td>
+</tr>
+<tr>
+<td><code>date_column</code></td>
+<td>—</td>
+<td>required; the column carrying the per-row timestamp the engine truncates by <code>period</code></td>
+</tr>
+<tr>
+<td><code>where</code></td>
+<td><code>None</code></td>
+<td>optional SQL fragment narrowing the input rows</td>
+</tr>
+</tbody>
+</table>
+<p>The drafter proposes this variant for <strong>incremental fact tables</strong> with a
+populated date partition column (<code>loaded_at</code>, <code>created_at</code>, <code>event_date</code>,
+<code>partition_date</code>); it proposes <code>seasonality="dow"</code> when the SQL suggests a
+business-calendar grain (weekday-only loads, business-day-aware rollups). It
+does not propose it for dimension tables, full-refresh models, or models
+without a recognisable date partition column.</p>
+<p><strong>Cold-start behaviour — first runs route to <code>kept-without-evidence</code>.</strong> The
+prune engine runs the stats query first and inspects the period count; if
+fewer than <code>min_samples_per_bucket</code> historical periods are populated, the
+violation query is skipped entirely and the candidate is kept with structured
+<code>why="insufficient history: n/min periods"</code>. This is the conservative-bias
+contract (<code>prune-engine.md</code>) — we never silently drop a test we cannot
+positively evaluate. As history accumulates on subsequent runs, the same
+candidate transitions to <code>kept</code> (real anomaly) or <code>dropped</code>
+(<code>always-passes</code>).</p>
+<p><strong>Emission shape.</strong> The drafter renders the variant as a singular
+<code>tests/&lt;model&gt;__row_count_anomaly_by_period__&lt;args_hash&gt;.sql</code> file (same shape
+as <code>custom_sql</code>) under <code>generate --write</code>. The header carries a
+<code>-- signalforge:generated &lt;hash&gt;</code> ownership marker; subsequent re-runs do not
+overwrite hand-authored files (<code>--force</code> overwrites a marked file only). No
+<code>schema.yml</code> block — the variant does not have a dbt-utils / dbt-expectations
+canonical macro today.</p>
+<p><strong>Time-bound reproducibility carve-out — <code>--as-of YYYY-MM-DD</code>.</strong> Every other
+SignalForge primitive satisfies Architectural Commitment #5 (same SQL + same
+warehouse data → same prune decision). This one cannot: a per-period anomaly
+check inherently moves the window every day. The new <code>--as-of</code> flag on both
+<code>signalforge generate</code> and <code>signalforge prune-existing</code> pins the evaluation
+date so reproducibility is restored at <code>(model, as_of)</code> granularity. When
+omitted, the prune engine resolves to <code>date.today()</code> at prune time and emits
+one INFO log line naming the resolved value; the resolved date lands on
+every <code>PruneEvent.as_of</code> audit field for after-the-fact reproducibility. In a
+multi-model <code>--select</code> batch the same <code>--as-of</code> applies to every model
+(resolved once at the orchestrator).</p>
+<p>See <a href="../draft-ops/#row-count-anomaly-tests-row_count_anomaly_by_period"><code>docs/draft-ops.md</code> § Row-count anomaly tests</a>
+for drafting; <a href="../prune-ops/#row_count_anomaly_by_period"><code>docs/prune-ops.md</code> § <code>row_count_anomaly_by_period</code></a>
+for the two-query split, cold-start routing, DOW degrade WARNING, and
+partition-filter cost mechanics; <a href="../cli-ops/"><code>docs/cli-ops.md</code> § <code>--as-of</code></a>
+for the flag reference; <a href="../grade-ops/#row-count-calibration"><code>docs/grade-ops.md</code> § Row-count calibration</a>
+for the <code>no-redundant</code> criterion's anomaly-specific calibration prose.</p>
+<h2 id="what-we-do-not-generate-today">What we do NOT generate today</h2>
+<p>SignalForge's catalogue is deliberately bounded — these shapes are tractable
+to draft, prune against real warehouse data, and grade against a structured
+rubric. The following classes of tests are NOT proposed today:</p>
+<ul>
+<li><strong>Column value range / statistical thresholds.</strong> No
+  <code>dbt_utils.expression_is_true</code> for numeric-range assertions, no
+  <code>dbt_expectations.expect_column_values_to_be_between</code> for column-level
+  bounds. These require operator-supplied semantic context the LLM can't
+  reliably infer from the SELECT body.</li>
+<li><strong>Conditional uniqueness beyond a simple <code>where</code>.</strong> <code>unique_combination</code>
+  carries an optional <code>where</code> filter, but multi-clause / dynamic-condition
+  uniqueness (e.g. "unique per user, unless the row is a soft-delete") is
+  out of scope — express these as <code>custom_sql</code>.</li>
+<li><strong>Statistical / distributional anomalies.</strong> No mean / stddev / outlier
+  detection, no <code>dbt_expectations.expect_column_mean_to_be_between</code> family.
+  These need a baseline the drafter doesn't compute.</li>
+<li><strong>Cross-table reconciliation.</strong> No sum / count parity checks across two
+  tables (a <code>relationships</code> test catches referential integrity, not
+  aggregate equivalence). Express these as <code>custom_sql</code> with the join in
+  the SELECT body.</li>
+<li><strong>Time-series anomaly detection beyond row-count.</strong> <code>row_count_anomaly_by_period</code>
+  catches "the most-recent period's row count is anomalous vs. history" — but
+  not "consecutive nulls &gt; N", not "per-column mean has drifted",
+  not "the freshness lag exceeds N hours without <code>dbt source freshness</code>." These
+  require per-column or freshness-specific stats the drafter doesn't model
+  today.</li>
+</ul>
+<p>Hand-authored <code>custom_sql</code> (a singular <code>tests/*.sql</code> file) covers any of the
+above when the rule is checkable against a single SELECT. SignalForge's
+<code>prune-existing --tests-dir</code> reads and prunes these alongside <code>schema.yml</code>
+tests.</p>
+<h2 id="references">References</h2>
+<ul>
+<li><a href="../draft-ops/"><code>docs/draft-ops.md</code></a> — Drafter operations: prompt structure,
+  per-variant drafting heuristics, the cache-stability snapshot, the
+  <code>exclude_tests</code> short-circuit.</li>
+<li><a href="../prune-ops/"><code>docs/prune-ops.md</code></a> — Prune operations: per-variant SQL
+  shapes, sample-mode behaviour, drop-reason taxonomy.</li>
+<li><a href="../grade-ops/"><code>docs/grade-ops.md</code></a> — Grade operations: the four-criterion
+  rubric, per-variant calibration prose (<code>no-redundant</code> covers
+  <code>row_count_between</code> numeric bounds and <code>unique_combination</code> grain
+  meaningfulness).</li>
+<li><a href="../ingest-ops/"><code>docs/ingest-ops.md</code></a> — Ingest operations: which dbt test
+  shapes <code>prune-existing</code> recognises (the four built-ins plus
+  <code>expect_table_row_count_to_be_between</code> and <code>unique_combination_of_columns</code>),
+  which it skip-records.</li>
+<li><a href="https://github.com/wjduenow/SignalForge/blob/dev/.claude/rules/business-rule-tests.md"><code>.claude/rules/business-rule-tests.md</code></a>
+  — The variant-extension pattern (the n-instance precedent for adding a
+  new <code>CandidateTest</code> discriminated-union variant).</li>
+<li>Issue series: <a href="https://github.com/wjduenow/SignalForge/issues/116">#116</a>
+  established <code>custom_sql</code>; <a href="https://github.com/wjduenow/SignalForge/issues/169">#169</a>
+  added <code>row_count_between</code>;
+  <a href="https://github.com/wjduenow/SignalForge/issues/170">#170</a> added
+  <code>unique_combination</code> and authored this catalogue;
+  <a href="https://github.com/wjduenow/SignalForge/issues/171">#171</a> added
+  <code>row_count_anomaly_by_period</code> and the <code>--as-of</code> reproducibility carve-out.</li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.tabs", "navigation.top", "search.highlight", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+    
+  </body>
+</html>
