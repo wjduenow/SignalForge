@@ -76,7 +76,9 @@ __all__ = [
     "is_deterministic_sql",
     "is_prunable_count_scalar",
     "is_row_returning",
+    "parses_under_dialect",
     "plan_relation_rewrite",
+    "strip_sql_comments",
     "validate_ingested_sql",
     "verify_relation_rewrite",
 ]
@@ -322,7 +324,36 @@ def is_prunable_count_scalar(sql: str, *, dialect: str = "bigquery") -> bool:
     return isinstance(proj, exp.Count)
 
 
-def _strip_sql_comments(sql: str) -> str:
+def parses_under_dialect(sql: str, *, dialect: str = "bigquery") -> bool:
+    """Return ``True`` iff ``sql`` parses cleanly under ``dialect``.
+
+    The narrow structural gate #270 DEC-003 adds so the prune compiler's
+    ``from_manifest`` arm can REFUSE a dbt-compiled body the LIVE warehouse
+    dialect does not accept — *before* the always-1 ``SELECT COUNT(*) AS failures
+    FROM (<sql>) …`` wrap runs. A body that parses under the ingest-side
+    ``"bigquery"`` default but fails under the live ``dialect.name`` is the G1
+    cross-dialect classify/compile divergence; a ``False`` here routes it to
+    ``_InvalidIdentifier`` → ``kept-without-evidence`` (the correctness fix, which
+    holds regardless of what dialect ingest classified under).
+
+    Catches the SHARED :data:`_PARSE_FAILURES` triple — a
+    ``sqlglot.errors.SqlglotError``, a ``RecursionError`` from a deeply-nested
+    body, or a ``ValueError`` from an unknown ``dialect=`` — and returns ``False``
+    on any of them OR when ``sqlglot.parse_one`` yields ``None``. Total over
+    hostile input like every sibling gate: a parse failure of ANY shape → ``False``,
+    never a raise. The ``False`` verdict is the *conservative* one here (unlike
+    :func:`is_deterministic_sql` / :func:`is_row_returning`, whose conservative
+    verdict is ``True``): the positive claim is "this body parses in this dialect",
+    and an unparseable body affords no such claim.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect=dialect)
+    except _PARSE_FAILURES:
+        return False
+    return tree is not None
+
+
+def strip_sql_comments(sql: str) -> str:
     """Strip ``--`` line comments and ``/* */`` block comments, string-literal-aware.
 
     A ``--`` / ``/*`` inside a ``'…'`` / ``"…"`` / `` `…` `` quoted span is NOT a
@@ -385,7 +416,7 @@ def _blank_sql_literals(sql: str) -> str:
     """Replace the *contents* of quoted string/identifier spans with spaces.
 
     Backslash-escape- and doubled-quote-aware (same quote tracking as
-    :func:`_strip_sql_comments`), so a ``;`` or paren hidden inside a literal is
+    :func:`strip_sql_comments`), so a ``;`` or paren hidden inside a literal is
     neutralised while a genuine top-level one survives the scan. Self-contained
     on purpose — it does NOT import the warehouse ``_strip_string_literals``
     private helper, so a rename there can't silently break the ingested-SQL gate
@@ -451,7 +482,7 @@ def validate_ingested_sql(sql: str) -> None:
     # while a genuine top-level one still trips the scan. Both passes share the
     # same backslash-/doubled-quote-aware quote tracking (no warehouse-private
     # import — see :func:`_blank_sql_literals`).
-    body = _blank_sql_literals(_strip_sql_comments(sql))
+    body = _blank_sql_literals(strip_sql_comments(sql))
 
     if ";" in body:
         raise QuerySyntaxError(detail="ingested SQL must be a single statement (no `;`)")

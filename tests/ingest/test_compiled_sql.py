@@ -15,6 +15,8 @@ from signalforge.ingest._compiled_sql import (
     is_deterministic_sql,
     is_prunable_count_scalar,
     is_row_returning,
+    parses_under_dialect,
+    strip_sql_comments,
     validate_ingested_sql,
 )
 from signalforge.warehouse.errors import QuerySyntaxError
@@ -338,3 +340,107 @@ def test_is_row_returning_unknown_dialect_returns_conservative_true() -> None:
 def test_is_prunable_count_scalar_unknown_dialect_returns_conservative_false() -> None:
     """An unknown ``dialect=`` must degrade, never escape as a ``ValueError``."""
     assert is_prunable_count_scalar("SELECT COUNT(*) FROM t", dialect="nope") is False
+
+
+# --------------------------------------------------------------------------- #
+# parses_under_dialect (#270 US-001 / DEC-003)
+# --------------------------------------------------------------------------- #
+
+# A body that is *itself* well-formed SQL but that ``sqlglot`` cannot parse — the
+# premise for the conservative-``False`` verdict below. Pinned by
+# :func:`test_malformed_body_raises_sqlglot_error` so the ``False`` test can never
+# pass vacuously (mirrors the recursion / unknown-dialect premise pins above).
+_MALFORMED_BODY = "SELECT FROM WHERE (("
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT a, b FROM t WHERE a <> b",
+        "SELECT COUNT(*) AS c FROM t",
+        "WITH c AS (SELECT n FROM t) SELECT n FROM c",
+        "SELECT * FROM t",
+    ],
+)
+def test_parses_under_dialect_clean_parse_returns_true(sql: str) -> None:
+    """A body that parses cleanly under the dialect returns ``True``."""
+    assert parses_under_dialect(sql) is True
+
+
+def test_malformed_body_raises_sqlglot_error() -> None:
+    """PLANTED PREMISE: the malformed body really does raise a ``SqlglotError``.
+
+    Mirrors :func:`test_unknown_dialect_raises_value_error_from_sqlglot` — without
+    it, the conservative-``False`` test below could pass vacuously if a future
+    ``sqlglot`` learned to parse this body, silently degrading the totality
+    guarantee to an assertion about a body that parses fine.
+    """
+    import sqlglot
+    import sqlglot.errors
+
+    with pytest.raises(sqlglot.errors.SqlglotError):
+        sqlglot.parse_one(_MALFORMED_BODY, dialect="bigquery")
+
+
+def test_parses_under_dialect_sqlglot_error_returns_false() -> None:
+    """A ``SqlglotError``-raising body degrades to ``False`` (skip-when-uncertain)."""
+    assert parses_under_dialect(_MALFORMED_BODY) is False
+
+
+def test_parses_under_dialect_recursion_error_returns_false() -> None:
+    """A ``RecursionError`` from a deeply-nested body must NOT escape → ``False``."""
+    assert parses_under_dialect(_deeply_nested_body()) is False
+
+
+def test_parses_under_dialect_unknown_dialect_returns_false() -> None:
+    """An unknown ``dialect=`` (``ValueError``) must degrade, never escape → ``False``."""
+    assert parses_under_dialect("SELECT 1", dialect="nope") is False
+
+
+def test_parses_under_dialect_tree_is_none_returns_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``None`` from ``sqlglot.parse_one`` degrades to ``False``.
+
+    ``sqlglot`` 30.2.1 raises rather than returning ``None`` for empty / comment-only
+    bodies, so the ``tree is None`` branch is pinned by forcing ``parse_one`` to
+    return ``None`` — the branch must still fail closed to ``False``.
+    """
+    monkeypatch.setattr("sqlglot.parse_one", lambda *args, **kwargs: None)
+    assert parses_under_dialect("SELECT COUNT(*) FROM t") is False
+
+
+# --------------------------------------------------------------------------- #
+# strip_sql_comments (#270 US-001 / DEC-001 — promoted from the private helper)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        # -- line comment dropped
+        ("SELECT a FROM t -- trailing\nWHERE a > 0", "SELECT a FROM t \nWHERE a > 0"),
+        # /* */ block comment collapses to one space
+        ("SELECT a /* block */ FROM t", "SELECT a   FROM t"),
+        # a `--` inside a single-quoted literal is NOT a comment
+        ("SELECT '-- not a comment' AS x FROM t", "SELECT '-- not a comment' AS x FROM t"),
+        # a backslash-escaped quote keeps the span open, so its `--` stays literal
+        ("SELECT 'it\\'s -- ok' FROM t", "SELECT 'it\\'s -- ok' FROM t"),
+        # no comments → byte-identical passthrough
+        ("SELECT COUNT(*) FROM t WHERE a <> b", "SELECT COUNT(*) FROM t WHERE a <> b"),
+    ],
+)
+def test_strip_sql_comments_behaviour(sql: str, expected: str) -> None:
+    """``strip_sql_comments`` (the public promotion of ``_strip_sql_comments``)
+    drops comments while leaving string-literal spans untouched."""
+    assert strip_sql_comments(sql) == expected
+
+
+def test_strip_sql_comments_is_the_validate_ingested_sql_input() -> None:
+    """Regression pin: the comment stripper still feeds ``validate_ingested_sql``.
+
+    The rename from the private ``_strip_sql_comments`` must not have changed the
+    behaviour ``validate_ingested_sql`` relies on — a ``;`` hidden ONLY inside a
+    comment is stripped and the body validates."""
+    # `;` lives inside the block comment → stripped → single-statement body.
+    validate_ingested_sql("SELECT a /* ; not injection */ FROM t WHERE a > 0")
