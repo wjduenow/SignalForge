@@ -1318,6 +1318,216 @@ def test_from_manifest_skip_folds_into_report(
     assert "malformed-supported-test×1" in err
 
 
+# ---------------------------------------------------------------------------
+# #270 US-004 — the live warehouse dialect is threaded into manifest ingest
+# ---------------------------------------------------------------------------
+
+
+def test_from_manifest_threads_live_dialect_into_read_manifest_tests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The LIVE ``adapter.dialect().name`` is threaded into
+    ``read_manifest_tests`` (#270 US-004 / DEC-003) — NOT the hard-coded
+    ``"bigquery"`` default.
+
+    The factory's adapter reports a *non-bigquery* dialect via a patched
+    instance ``dialect()`` (which does no I/O — it returns a frozen
+    ``Dialect`` constant). The spy on ``read_manifest_tests`` captures the
+    ``dialect`` kwarg it received and asserts it is that non-bigquery name; a
+    regression that dropped the wiring (leaving the ``"bigquery"`` default)
+    would fail the assertion. The spy delegates to the real
+    ``read_manifest_tests`` with ``dialect="bigquery"`` restored so the rest of
+    the run classifies + prunes the five manifest candidates exactly as the
+    normal ``--from-manifest`` path.
+    """
+    import dataclasses
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+    from signalforge.warehouse.models import BIGQUERY_DIALECT
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    # A real, frozen Dialect whose ``name`` is NOT "bigquery" — so a hard-coded
+    # default would fail the assertion below.
+    marker_dialect = dataclasses.replace(BIGQUERY_DIALECT, name="databricks")
+
+    def factory(profile: object) -> BigQueryAdapter:
+        fake = FakeBigQueryClient(project="bigquery-public-data")
+        for fails in (0, 5, 0, 5, 0):
+            fake.expect_query(
+                matching=re.compile("COUNT", re.IGNORECASE),
+                returns=[{"failures": fails}],
+            )
+        adapter = BigQueryAdapter(
+            project="bigquery-public-data",
+            location="US",
+            max_bytes_billed=100_000_000,
+            client=fake,
+        )
+        # Instance-level override: ``adapter.dialect()`` (an explicit call, not a
+        # dunder) resolves the instance attribute. dialect() does no I/O.
+        monkeypatch.setattr(adapter, "dialect", lambda: marker_dialect)
+        return adapter
+
+    captured: dict[str, Any] = {}
+    real = pe_mod.ingest_module.read_manifest_tests
+
+    def _spy(manifest: Any, model: Any, **kwargs: Any) -> Any:
+        captured["dialect"] = kwargs.get("dialect")
+        # Restore the bigquery default when delegating so the fixture's
+        # bigquery-compiled bodies classify/prune normally regardless of the
+        # marker name — this test isolates the threading assertion.
+        return real(manifest, model, **{**kwargs, "dialect": "bigquery"})
+
+    monkeypatch.setattr(pe_mod.ingest_module, "read_manifest_tests", _spy)
+
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    err = capsys.readouterr().err
+    assert code == 0, err
+    # The live adapter dialect name reached read_manifest_tests — not "bigquery".
+    assert captured["dialect"] == "databricks"
+
+
+def test_from_manifest_adapter_entered_exactly_once_and_same_instance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The un-entered adapter built before the ingest step (to read
+    ``dialect().name``) is the SAME instance passed to ``prune_tests``, and it
+    is entered exactly ONCE — by ``prune_tests``' own ``with adapter:`` block
+    (#270 US-004). Proves no double-construction and no double-enter.
+
+    ``__enter__`` is counted at the CLASS level because ``with adapter:``
+    resolves ``__enter__`` on the type, not the instance; instance identity is
+    captured by spying the ``prune_tests`` positional ``adapter`` arg.
+    """
+    from typing import Any
+
+    from signalforge.cli import prune_existing as pe_mod
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+
+    created: dict[str, Any] = {}
+    seen: dict[str, Any] = {}
+    enter_calls = {"count": 0}
+
+    def factory(profile: object) -> BigQueryAdapter:
+        fake = FakeBigQueryClient(project="bigquery-public-data")
+        for fails in (0, 5, 0, 5, 0):
+            fake.expect_query(
+                matching=re.compile("COUNT", re.IGNORECASE),
+                returns=[{"failures": fails}],
+            )
+        adapter = BigQueryAdapter(
+            project="bigquery-public-data",
+            location="US",
+            max_bytes_billed=100_000_000,
+            client=fake,
+        )
+        created["adapter"] = adapter
+        return adapter
+
+    real_enter = BigQueryAdapter.__enter__
+
+    def _counting_enter(self: BigQueryAdapter) -> Any:
+        enter_calls["count"] += 1
+        return real_enter(self)
+
+    monkeypatch.setattr(BigQueryAdapter, "__enter__", _counting_enter)
+
+    real_prune = pe_mod.prune_module.prune_tests
+
+    def _prune_spy(model: Any, adapter: Any, *rest: Any, **kwargs: Any) -> Any:
+        seen["adapter"] = adapter
+        return real_prune(model, adapter, *rest, **kwargs)
+
+    monkeypatch.setattr(pe_mod.prune_module, "prune_tests", _prune_spy)
+
+    argv = _expectations_argv(
+        project_dir,
+        schema_path,
+        "--from-manifest",
+        "--tests-dir",
+        str(_empty_tests_dir(project_dir)),
+    )
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    assert code == 0, capsys.readouterr().err
+    # The SAME un-entered instance flowed from the pre-ingest build to prune_tests.
+    assert seen["adapter"] is created["adapter"]
+    # Entered exactly once (by prune_tests) — never double-entered.
+    assert enter_calls["count"] == 1
+
+
+def test_from_manifest_wired_dialect_drives_compiler_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The WIRED dialect flows end-to-end into the compiler's
+    ``parses_under_dialect`` refusal (#270 US-004 threading + US-003 backstop).
+
+    The adapter reports a synthetic dialect name that sqlglot cannot parse under
+    (proving the wired name — not the ``"bigquery"`` default — reaches BOTH the
+    ingest classifier AND the compiler). Every ingested manifest body therefore
+    routes to ``_InvalidIdentifier`` → ``kept-without-evidence`` (diff tier
+    ``kept-uncertain``) with NO warehouse query — the fake is queued with zero
+    expectations, so an unexpected COUNT would raise. This offline
+    cross-dialect-divergence pin proves the refusal fires because of the wired
+    dialect, not by accident.
+    """
+    import dataclasses
+    import json
+
+    from signalforge.warehouse.models import BIGQUERY_DIALECT
+
+    project_dir, schema_path = _setup_expectations_project(tmp_path)
+    # An unknown-to-sqlglot dialect name — every body fails ``parses_under_dialect``.
+    unknown_dialect = dataclasses.replace(BIGQUERY_DIALECT, name="not_a_real_sqlglot_dialect")
+
+    def factory(profile: object) -> BigQueryAdapter:
+        # No COUNT expectations: every body is refused pre-warehouse, so no query
+        # ever fires. An unexpected query would raise inside the fake.
+        fake = FakeBigQueryClient(project="bigquery-public-data")
+        adapter = BigQueryAdapter(
+            project="bigquery-public-data",
+            location="US",
+            max_bytes_billed=100_000_000,
+            client=fake,
+        )
+        monkeypatch.setattr(adapter, "dialect", lambda: unknown_dialect)
+        return adapter
+
+    argv = [
+        *_expectations_argv(
+            project_dir,
+            schema_path,
+            "--from-manifest",
+            "--tests-dir",
+            str(_empty_tests_dir(project_dir)),
+        ),
+        "--format",
+        "json",
+    ]
+    with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
+        code = main(argv)
+    captured_io = capsys.readouterr()
+    assert code == 0, captured_io.err
+    payload = json.loads(captured_io.out)
+    test_entries = [e for e in payload["entries"] if e["test_type"] is not None]
+    # At least the fixture's ingestable manifest bodies became candidates.
+    assert len(test_entries) >= 1
+    # The wired (unknown) dialect drove the compiler refusal for every one of
+    # them → kept-without-evidence (kept-uncertain), never kept/dropped/flagged.
+    assert all(e["tier"] == "kept-uncertain" for e in test_entries)
+    assert payload["flagged_count"] == 0
+
+
 def test_from_manifest_grade_runs_grade_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
