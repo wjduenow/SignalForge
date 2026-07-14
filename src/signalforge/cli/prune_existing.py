@@ -562,6 +562,7 @@ def _ingest_manifest_tests(
     project_dir: Path,
     model: manifest_module.Model,
     manifest: manifest_module.Manifest,
+    dialect: str,
 ) -> tuple[CandidateSchema, tuple[ingest_module.SkippedTest, ...]]:
     """Merge the model's dbt-compiled manifest test nodes into ``candidate``
     (#154 US-007 / DEC-005).
@@ -585,24 +586,25 @@ def _ingest_manifest_tests(
     ingestable manifest test nodes the candidate is returned unchanged so the
     output stays identical to the pre-``--from-manifest`` merge.
 
-    **Dialect (#268 DEC-013).** ``read_manifest_tests`` accepts a keyword-only
-    ``dialect`` so its sqlglot gates parse ``compiled_code`` under the same
-    dialect the prune compiler will. This call site deliberately leaves it at the
-    ``"bigquery"`` default: the warehouse adapter (the only source of a live
-    ``Dialect``) is constructed AFTER this ingest step in ``cmd_prune_existing``
-    (``prune_tests`` owns the ``with adapter:`` block, so the handler builds the
-    adapter late and un-entered). Passing a real dialect here would mean building
-    the adapter earlier purely to read ``dialect().name`` — a plumbing change out
-    of scope for this seam. The default is safe not because the disagreement is
-    harmless in the gates — they are *permissive* on a parse failure
-    (``is_row_returning`` / ``is_deterministic_sql`` return ``True``), so a
-    mismatch could ADMIT a body rather than skip-record it — but because the
-    downstream compile path is **fail-closed**: an ingested body the compiler
-    cannot safely rewrite/validate under the real dialect routes to
-    ``kept-without-evidence`` via ``_InvalidIdentifier`` (or the DEC-007 guard),
-    never a wrong verdict. The disagreement can cost signal, never correctness.
+    **Dialect (#268 DEC-013 → #270 DEC-003).** ``read_manifest_tests`` accepts a
+    keyword-only ``dialect`` so its sqlglot gates parse ``compiled_code`` under
+    the same dialect the prune compiler will (signal-consistency). ``dialect`` is
+    threaded from the live warehouse adapter's ``dialect().name`` by
+    ``cmd_prune_existing``, which now builds the un-entered adapter BEFORE this
+    ingest step (``dialect()`` on an un-entered adapter does no I/O — it returns a
+    module constant — and the same un-entered instance flows to ``prune_tests``,
+    which owns the ``with adapter:`` block). This closes the #268 deferral: ingest
+    and the compiler now classify under the SAME dialect, so a body that parses
+    under BigQuery but is rejected by the live dialect is not admitted by the
+    permissive ingest gates in the first place. The compiler-side refusal
+    (#270 US-003: ``parses_under_dialect`` → ``_InvalidIdentifier`` →
+    ``kept-without-evidence``) remains the correctness backstop regardless of what
+    dialect ingest classified under — so this wiring is a signal fix, never a
+    correctness one.
     """
-    manifest_result = ingest_module.read_manifest_tests(manifest, model, project_dir=project_dir)
+    manifest_result = ingest_module.read_manifest_tests(
+        manifest, model, project_dir=project_dir, dialect=dialect
+    )
     if not manifest_result.candidate.tests:
         return candidate, manifest_result.skipped
     merged = candidate.model_copy(
@@ -662,27 +664,30 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
        unique_id / file-path).
     5. Canonicalise ``--schema`` via :func:`canonicalise_user_path`
        (→ :class:`CliPathError` on symlink/containment — DEC-005).
-    6. ``read_schema(schema_path, model, project_dir=project_dir)`` —
+    6. Build the un-entered warehouse adapter via
+       :func:`_make_warehouse_adapter` (DEC-009) so its ``dialect().name``
+       can be threaded into manifest ingest (#270 US-004 / DEC-003).
+       ``dialect()`` does no I/O; ``prune_tests`` owns the ``with adapter:``
+       block, so the SAME un-entered instance is reused in step 10 — never
+       entered here nor constructed twice.
+    7. ``read_schema(schema_path, model, project_dir=project_dir)`` —
        passing the ``Path`` so the full ingest typed-error surface fires.
        Then ``read_test_files(tests_dir, model, manifest,
        existing=<schema candidate>)`` (US-014) ingests the operator's
        singular ``tests/*.sql`` (default ``<project_dir>/tests``,
        overridable via ``--tests-dir``), deduped against the schema.yml
        tests. Under ``--from-manifest`` (#154 US-007 / DEC-005),
-       ``read_manifest_tests(manifest, model)`` ALSO ingests the model's
-       compiled manifest test nodes; all model-level tests merge into ONE
-       candidate so the warehouse prunes them together (DEC-010 / DEC-013).
-       The default ``tests/`` directory is optional and silently skipped
-       when absent.
-    7. Skipped-test report (DEC-007) — summary + ``--verbose`` detail,
+       ``read_manifest_tests(manifest, model, dialect=adapter.dialect().name)``
+       ALSO ingests the model's compiled manifest test nodes under the LIVE
+       dialect (#270 US-004); all model-level tests merge into ONE candidate
+       so the warehouse prunes them together (DEC-010 / DEC-013). The default
+       ``tests/`` directory is optional and silently skipped when absent.
+    8. Skipped-test report (DEC-007) — summary + ``--verbose`` detail,
        suppressed by ``--quiet``. Schema.yml, singular-test, and
        (under ``--from-manifest``) manifest-test skips fold into one report
        grouped by SkipReason.
-    8. Load + override :class:`PruneConfig` (``--scope`` /
+    9. Load + override :class:`PruneConfig` (``--scope`` /
        ``--sample-strategy`` via ``model_validate`` — DEC-002).
-    9. Build the warehouse adapter via :func:`_make_warehouse_adapter`
-       (DEC-009); ``prune_tests`` owns the ``with adapter:`` block, so the
-       adapter is passed un-entered.
     10. ``prune_tests(model, adapter, candidate, manifest,
         as_of=args.as_of, ...)`` — ``--as-of`` (US-013 of #171 /
         DEC-001) threads through; ``None`` lets the engine resolve to
@@ -781,6 +786,21 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
         schema_path = canonicalise_user_path(args.schema, project_dir)
         assert schema_path is not None  # --schema is required (argparse)
 
+        # Build the un-entered warehouse adapter BEFORE the ingest step
+        # (#270 US-004 / DEC-003). ``dialect()`` on an un-entered adapter does
+        # NO I/O — it returns a module constant, and the prune engine itself
+        # reads ``adapter.dialect()`` before its own ``with adapter:`` block —
+        # so constructing the adapter here (and reading ``dialect().name``)
+        # costs nothing. The live dialect is threaded into the manifest-ingest
+        # step so ingest classifies ``compiled_code`` under the SAME dialect the
+        # prune compiler will; the SAME un-entered instance flows to
+        # ``prune_tests`` below (``prune_tests`` owns the ``with adapter:``
+        # block — DEC-013 of #22 — so the adapter must not be entered here nor
+        # constructed twice).
+        profile = warehouse_module.load_profile(project_dir)
+        adapter = _make_warehouse_adapter(profile)
+        dialect_name = adapter.dialect().name
+
         # ---- 1/N: ingest ------------------------------------------------
         if progress_on:
             emit_progress_entry(1, "ingest", "parsing schema.yml...", total=total)
@@ -818,6 +838,7 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
                 project_dir=project_dir,
                 model=model,
                 manifest=manifest,
+                dialect=dialect_name,
             )
         if progress_on:
             emit_progress_done(1, "ingest", time.monotonic() - _t0, total=total)
@@ -848,9 +869,10 @@ def cmd_prune_existing(args: argparse.Namespace) -> int:
 
         candidate_test_count = sum(len(c.tests) for c in candidate.columns) + len(candidate.tests)
 
-        profile = warehouse_module.load_profile(project_dir)
-        adapter = _make_warehouse_adapter(profile)
-
+        # The adapter was built (un-entered) before the ingest step so the live
+        # dialect could be threaded into manifest ingest (#270 US-004). Reuse the
+        # SAME instance here — ``prune_tests`` owns the ``with adapter:`` block, so
+        # it must receive an un-entered adapter and must not be constructed twice.
         if progress_on:
             emit_progress_entry(
                 2,
