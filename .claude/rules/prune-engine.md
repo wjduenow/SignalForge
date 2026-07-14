@@ -269,7 +269,7 @@ Manifest-ingested `custom_sql` candidates (`from_manifest=True`, see `ingest-lay
 
 ## Ingested manifest-compiled tests: comment-strip + dialect-refusal (#270, LANDED)
 
-#270 closed the four #267-QG follow-up edges in the `from_manifest` arm of `_compile_custom_sql`. Two of
+Issue #270 closed the four #267-QG follow-up edges in the `from_manifest` arm of `_compile_custom_sql`. Two of
 them (G2 CTE-classifier, G4 tests-dir asymmetry) live in ingest/docs; the two compiler-side changes:
 
 - **Comment-strip on COMPLETE strings, at the compiler, downstream of the engine's span machinery

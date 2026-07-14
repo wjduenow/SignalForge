@@ -214,6 +214,14 @@ _CTE_ONE_ROW_NO_FIRE: list[tuple[str, str]] = [
         "SELECT n FROM (SELECT COUNT(*) n FROM t) x TABLESAMPLE SYSTEM (10 PERCENT)",
         "bigquery",
     ),
+    # A row-GENERATING projection (explode) over a scalar-aggregate source fans
+    # the single row into many → bail (Spark/Databricks).
+    ("SELECT explode(arr) AS e FROM (SELECT COUNT(*) n FROM t) x", "spark"),
+    # A LATERAL VIEW multiplies the source's single row → bail.
+    (
+        "SELECT n FROM (SELECT COUNT(*) n FROM t) x LATERAL VIEW explode(arr) v AS col",
+        "spark",
+    ),
     # Existing non-regressions — the new branch must not disturb them.
     ("SELECT id, COUNT(*) OVER () AS n FROM t", "bigquery"),
     ("SELECT x, (SELECT MAX(y) FROM t2) AS m FROM t1", "bigquery"),

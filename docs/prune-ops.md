@@ -353,7 +353,7 @@ already ran at ingest is kept as a belt-and-braces `kept-without-evidence`
 fallback in the compiler (the total-compilation choke point).
 
 **Comment-bearing bodies now execute and earn a real verdict (#270).** Before
-#270 the story above stopped at ingest: the **adapter's** execution-time gate
+this change the story above stopped at ingest: the **adapter's** execution-time gate
 (`_sql_safety.validate_test_sql`, run first in `run_test_sql`) is the strict
 `#116` variant and still rejects `--` / `/* */` wholesale, so a comment-bearing
 `compiled_code` body — the common case for real dbt-expectations / dbt-utils /

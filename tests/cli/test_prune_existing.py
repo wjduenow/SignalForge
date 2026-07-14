@@ -1414,7 +1414,7 @@ def test_from_manifest_adapter_entered_exactly_once_and_same_instance(
 
     project_dir, schema_path = _setup_expectations_project(tmp_path)
 
-    created: dict[str, Any] = {}
+    created: list[Any] = []
     seen: dict[str, Any] = {}
     enter_calls = {"count": 0}
 
@@ -1431,7 +1431,7 @@ def test_from_manifest_adapter_entered_exactly_once_and_same_instance(
             max_bytes_billed=100_000_000,
             client=fake,
         )
-        created["adapter"] = adapter
+        created.append(adapter)
         return adapter
 
     real_enter = BigQueryAdapter.__enter__
@@ -1460,8 +1460,11 @@ def test_from_manifest_adapter_entered_exactly_once_and_same_instance(
     with patch("signalforge.cli.prune_existing._make_warehouse_adapter", factory):
         code = main(argv)
     assert code == 0, capsys.readouterr().err
+    # The adapter was constructed exactly ONCE — a second build would overwrite
+    # nothing here (list), so identity + single-enter below can't paper over it.
+    assert len(created) == 1
     # The SAME un-entered instance flowed from the pre-ingest build to prune_tests.
-    assert seen["adapter"] is created["adapter"]
+    assert seen["adapter"] is created[0]
     # Entered exactly once (by prune_tests) — never double-entered.
     assert enter_calls["count"] == 1
 
@@ -1525,6 +1528,9 @@ def test_from_manifest_wired_dialect_drives_compiler_refusal(
     # The wired (unknown) dialect drove the compiler refusal for every one of
     # them → kept-without-evidence (kept-uncertain), never kept/dropped/flagged.
     assert all(e["tier"] == "kept-uncertain" for e in test_entries)
+    # ...and specifically via the live-dialect parse refusal — not some other
+    # pre-warehouse uncertainty path that would also land kept-uncertain.
+    assert all("does not parse under the live warehouse dialect" in e["why"] for e in test_entries)
     assert payload["flagged_count"] == 0
 
 

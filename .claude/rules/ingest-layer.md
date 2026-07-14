@@ -138,7 +138,7 @@ prune gate for dbt-expectations / dbt-utils / in-house generic tests (Architectu
 
 ## Two more analysis helpers + the CTE-cardinality classifier (issue #270)
 
-#270 closed the four #267-QG follow-up edges. All the new machinery lands in the existing
+Issue #270 closed the four #267-QG follow-up edges. All the new machinery lands in the existing
 `ingest/_compiled_sql.py` (stage-0, analysis-only) — **sqlglot importer count stays 2**; the prune
 compiler consumes the helpers, never sqlglot. Three durable additions:
 

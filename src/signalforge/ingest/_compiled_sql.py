@@ -235,6 +235,20 @@ _ONE_ROW_REDUCER_KEYS: Final[frozenset[str]] = frozenset(
     {"where", "having", "qualify", "limit", "offset", "distinct"}
 )
 
+#: Row-GENERATING set-returning functions: one input row fans out to many, so a
+#: projection containing any of these (or a ``LATERAL VIEW`` on the select) breaks
+#: the "exactly one row" proof even when the source is a scalar aggregate. Element
+#: type is left to inference — sqlglot's ``exp.Expression`` base is not re-exported
+#: from its stubs, and ``.find(*_ROW_GENERATOR_EXPRS)`` accepts the concrete tuple.
+_ROW_GENERATOR_EXPRS: Final = (
+    exp.Explode,
+    exp.ExplodeOuter,
+    exp.Posexplode,
+    exp.PosexplodeOuter,
+    exp.Inline,
+    exp.Unnest,
+)
+
 
 def _scope_produces_exactly_one_row(scope: Scope, depth: int = 0) -> bool:
     """Return ``True`` iff ``scope`` provably emits exactly one row (#270 DEC-002).
@@ -292,6 +306,13 @@ def _scope_produces_exactly_one_row(scope: Scope, depth: int = 0) -> bool:
     if any(sel.args.get(key) is not None for key in _ONE_ROW_REDUCER_KEYS):
         return False
     if sel.args.get("joins"):  # JOIN / comma-join can multiply rows.
+        return False
+    # A row-GENERATING projection (explode / posexplode / inline / unnest in the
+    # SELECT list) or a LATERAL VIEW fans one source row into many, so the
+    # pass-through is not one-row. Guard before recursing (Spark/Databricks).
+    if sel.args.get("laterals"):
+        return False
+    if any(proj.find(*_ROW_GENERATOR_EXPRS) is not None for proj in projections):
         return False
     frm = sel.args.get("from") or sel.args.get("from_")  # "from_" in sqlglot 30.2.1
     if frm is None:

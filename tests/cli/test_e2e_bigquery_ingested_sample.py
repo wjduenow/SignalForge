@@ -79,11 +79,13 @@ margin; assertions are ``>= 1``-shaped, never ``== N``.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from signalforge.cli import main
+from signalforge.prune.models import PruneDecision
 from tests.cli._e2e_helpers import (
     copy_fixture_to_tmp,
     inject_manifest_test_node,
@@ -208,6 +210,38 @@ def _count_scalar_body(column: str, *, empty: bool) -> str:
     """
     condition = f"{column} is null" if empty else f"{column} is not null"
     return f"select count(*)\nfrom {_RELATION}\nwhere {condition}"
+
+
+def _index_ingested_by_predicate(
+    ingested: list[PruneDecision], predicates: Mapping[str, str]
+) -> dict[str, PruneDecision]:
+    """Map each label to the ONE ingested decision whose SQL carries its predicate.
+
+    The manifest-ingested candidates are model-level (``column=None``), so they
+    share a ``test_anchor`` and cannot be told apart by it — the engineered WHERE
+    predicate embedded in ``compiled_sql`` is the only stable per-candidate key.
+    Asserts a strict 1:1 mapping (every decision matches exactly one label, every
+    label exactly one decision) so a mislabelled or duplicated match fails loud
+    rather than silently letting a swapped verdict pass. Callers must choose
+    predicates that are mutually non-substring (e.g. ``x is not null`` is NOT a
+    substring of ``x is null``).
+    """
+    result: dict[str, PruneDecision] = {}
+    for decision in ingested:
+        sql = (decision.compiled_sql or "").lower()
+        matched = [label for label, needle in predicates.items() if needle.lower() in sql]
+        assert len(matched) == 1, (
+            f"expected each ingested body to match exactly one predicate label; "
+            f"{decision.compiled_sql!r} matched {matched}"
+        )
+        label = matched[0]
+        assert label not in result, f"two ingested bodies matched label {label!r}"
+        result[label] = decision
+    assert set(result) == set(predicates), (
+        f"not every predicate label matched a decision: "
+        f"expected {set(predicates)}, got {set(result)}"
+    )
+    return result
 
 
 def _write_external_schema_and_billing_profile(project_dir: Path) -> Path:
@@ -535,19 +569,33 @@ def test_e2e_ingested_comment_bearing_body_executes_against_bigquery(
             f"comment-strip did not run:\n{decision.compiled_sql}"
         )
 
-    # (3) — real verdicts, proving BigQuery accepted and ran the stripped SQL.
-    # `>= 1`, never `== N`.
-    dropped = [d for d in ingested if d.decision == "dropped" and d.reason == "always-passes"]
-    assert len(dropped) >= 1, (
-        "no comment-bearing ingested test was dropped as always-passes; verdicts: "
-        f"{[(d.test_anchor, d.decision, d.reason, d.failures) for d in ingested]}"
+    # (3) — real verdicts, proving BigQuery accepted and ran the stripped SQL,
+    # asserted PER CANDIDATE by the body's predicate (the model-level test_anchor
+    # is shared, so compiled_sql is the only stable per-candidate key). A
+    # `>= 1 dropped AND >= 1 kept` check would pass even if the always-pass and
+    # violation verdicts were swapped; keying by predicate rules that out.
+    # `<col> is not null` is not a substring of `<col> is null`, so the keys are
+    # unambiguous; magnitudes are irrelevant (`>= 1`, never `== N`).
+    verdicts = _index_ingested_by_predicate(
+        ingested,
+        {
+            "pass_trip_id": "trip_id is not null",
+            "pass_start_time": "start_time is not null",
+            "violation": "trip_id is null",
+        },
     )
-    kept = [d for d in ingested if d.decision == "kept" and d.reason == "kept"]
-    assert len(kept) >= 1, (
-        "the comment-bearing engineered-violation test was not kept; verdicts: "
-        f"{[(d.test_anchor, d.decision, d.reason, d.failures) for d in ingested]}"
+    for key in ("pass_trip_id", "pass_start_time"):
+        d = verdicts[key]
+        assert d.decision == "dropped" and d.reason == "always-passes", (
+            f"comment-bearing always-pass body {key!r} was not dropped: "
+            f"{(d.decision, d.reason, d.failures)}"
+        )
+    violation = verdicts["violation"]
+    assert violation.decision == "kept" and violation.reason == "kept", (
+        "the comment-bearing engineered-violation test was not kept: "
+        f"{(violation.decision, violation.reason, violation.failures)}"
     )
-    assert all(d.failures is not None and d.failures >= 1 for d in kept)
+    assert violation.failures is not None and violation.failures >= 1
 
 
 @pytest.mark.bigquery
@@ -653,18 +701,26 @@ def test_e2e_ingested_count_scalar_restructure_executes_against_bigquery(
             f"the #267 count-scalar restructure suffix is missing:\n{decision.compiled_sql}"
         )
 
-    # (4) — the engineered verdicts. The zero-count body drops as always-passes;
-    # the non-zero-count body is kept with >= 1 failure. `>= 1`, never `== N`.
-    dropped = [d for d in ingested if d.decision == "dropped" and d.reason == "always-passes"]
-    assert len(dropped) >= 1, (
+    # (4) — the engineered verdicts, asserted PER CANDIDATE by the body's WHERE
+    # predicate (both nodes share the model-level ``test_anchor``, so the
+    # compiled_sql is the only stable per-candidate key). A `>= 1 dropped AND
+    # >= 1 kept` check would pass even if the two verdicts were SWAPPED; keying by
+    # predicate proves the zero-count body drops and the non-zero body keeps.
+    # `trip_id is not null` is not a substring of `trip_id is null`, so the keys
+    # are unambiguous; magnitudes are irrelevant (`>= 1`, never `== N`).
+    verdicts = _index_ingested_by_predicate(
+        ingested, {"zero": "trip_id is null", "nonzero": "trip_id is not null"}
+    )
+    zero = verdicts["zero"]
+    nonzero = verdicts["nonzero"]
+    assert zero.decision == "dropped" and zero.reason == "always-passes", (
         "the guaranteed-zero count scalar was not dropped as always-passes — the "
-        "restructure or the 0 = pass reinterpretation is wrong; verdicts: "
-        f"{[(d.test_anchor, d.decision, d.reason, d.failures) for d in ingested]}"
+        f"restructure or the 0 = pass reinterpretation is wrong: "
+        f"{(zero.decision, zero.reason, zero.failures)}"
     )
-    kept = [d for d in ingested if d.decision == "kept" and d.reason == "kept"]
-    assert len(kept) >= 1, (
+    assert nonzero.decision == "kept" and nonzero.reason == "kept", (
         "the guaranteed-non-zero count scalar was not kept — the restructure may "
-        "have collapsed a non-zero count to zero rows; verdicts: "
-        f"{[(d.test_anchor, d.decision, d.reason, d.failures) for d in ingested]}"
+        f"have collapsed a non-zero count to zero rows: "
+        f"{(nonzero.decision, nonzero.reason, nonzero.failures)}"
     )
-    assert all(d.failures is not None and d.failures >= 1 for d in kept)
+    assert nonzero.failures is not None and nonzero.failures >= 1
