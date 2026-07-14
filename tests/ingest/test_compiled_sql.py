@@ -205,6 +205,15 @@ _CTE_ONE_ROW_NO_FIRE: list[tuple[str, str]] = [
     ),
     # HAVING on the base aggregate disqualifies the base case.
     ("WITH c AS (SELECT COUNT(*) n FROM t HAVING COUNT(*)>0) SELECT n FROM c", "bigquery"),
+    # A pass-through hop with NO FROM is not a provable single-relation one-row shape.
+    ("SELECT 1", "bigquery"),
+    # A FROM source that is not a Table/Subquery (UNNEST / TVF / VALUES) → bail.
+    ("SELECT x FROM UNNEST([1,2,3]) AS x", "bigquery"),
+    # A pass-through source carrying TABLESAMPLE / PIVOT re-cardinalises → bail.
+    (
+        "SELECT n FROM (SELECT COUNT(*) n FROM t) x TABLESAMPLE SYSTEM (10 PERCENT)",
+        "bigquery",
+    ),
     # Existing non-regressions — the new branch must not disturb them.
     ("SELECT id, COUNT(*) OVER () AS n FROM t", "bigquery"),
     ("SELECT x, (SELECT MAX(y) FROM t2) AS m FROM t1", "bigquery"),

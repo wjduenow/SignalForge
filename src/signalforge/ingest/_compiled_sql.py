@@ -478,6 +478,13 @@ def strip_sql_comments(sql: str) -> str:
     dropped (block comments collapse to a single space); string/identifier spans
     pass through untouched so the downstream ``;`` / paren scan can blank them via
     :func:`signalforge.warehouse._sql_safety._strip_string_literals`.
+
+    Postgres dollar-quoting (``$$…$$`` / ``$tag$…$tag$``) is intentionally NOT
+    modelled: a ``--`` inside a ``$$…$$`` body would be stripped as a comment. This
+    is harmless today — Postgres is a non-executing stub (#53), and BQ / Snowflake
+    reject a ``$$`` body at :func:`parses_under_dialect` → ``kept-without-evidence``
+    — but a future Postgres executor MUST make this scanner dollar-quote-aware
+    before it can trust a comment-stripped body.
     """
     out: list[str] = []
     i = 0
